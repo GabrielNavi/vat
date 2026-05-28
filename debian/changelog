@@ -1,9 +1,6 @@
-vx-dga-l-vat (0.1-2) unstable; urgency=low
+vx-dga-l-vat (0.3-1) unstable; urgency=low
 
-  * vat-operate: parser completo implementado.
-    - Conversion YAML→JSON via yq; pipeline de pasos encadenados stdin→stdout.
-    - Guardia de metadata VA*: hostname/ip/mac/status/last_seen/extra_*
-      garantizados en cada cliente del resultado tras el pipeline completo.
+  * vat-operate:
     - Pasos implementados: select_clients, filter_keys, transform,
       truncate_lists, anonymize (hash sha256 + redact), limit_depth,
       json_schema_validation (requiere python3-jsonschema, opcional),
@@ -13,18 +10,37 @@ vx-dga-l-vat (0.1-2) unstable; urgency=low
     - Matching por source_component y direction antes de ejecutar el pipeline.
   * debian/control: añadido yq a Depends.
 
+ -- Gabriel Navia <correos@gabrielnav.es>  Wed, 28 May 2026 18:00:00 +0200
+
+vx-dga-l-vat (0.2-2) unstable; urgency=low
+
+  * vat-operate: parser completo implementado.
+    - Conversion YAML→JSON via yq; pipeline de pasos encadenados stdin→stdout.
+    - Guardia de metadata VA*: hostname/ip/mac/status/last_seen/extra_*
+      garantizados en cada cliente del resultado tras el pipeline completo.
+
+ -- Gabriel Navia <correos@gabrielnav.es>  Wed, 28 May 2026 18:00:00 +0200
+ 
+ vx-dga-l-vat (0.2-1) unstable; urgency=low
+
+  * Estructura de presets: /etc/vat/presets.d/ para presets del administrador,
+    /usr/share/vat/presets/ para presets de referencia distribuidos con el paquete.
+  * Preset de referencia: /usr/share/vat/presets/example.yaml con documentacion
+    completa de todas las operaciones disponibles (version futura).
+
+ -- Gabriel Navia <correos@gabrielnav.es>  Wed, 28 May 2026 18:00:00 +0200
+
+vx-dga-l-vat (0.1-2) unstable; urgency=low
+
+  * vat-operate: stub del transformador de inventarios JSON del ecosistema VA*.
+    Lee stdin ({"clients": [...]}), aplica el preset YAML indicado y escribe
+    el resultado en stdout. La logica de transformacion se implementara en
+    versiones posteriores; esta version es passthrough completo.
+
  -- Gabriel Navia <correos@gabrielnav.es>  Wed, 28 May 2026 19:00:00 +0200
 
 vx-dga-l-vat (0.1-1) unstable; urgency=low
 
   * Initial release.
-  * vat-operate: stub del transformador de inventarios JSON del ecosistema VA*.
-    Lee stdin ({"clients": [...]}), aplica el preset YAML indicado y escribe
-    el resultado en stdout. La logica de transformacion se implementara en
-    versiones posteriores; esta version es passthrough completo.
-  * Estructura de presets: /etc/vat/presets.d/ para presets del administrador,
-    /usr/share/vat/presets/ para presets de referencia distribuidos con el paquete.
-  * Preset de referencia: /usr/share/vat/presets/example.yaml con documentacion
-    completa de todas las operaciones disponibles (version futura).
 
  -- Gabriel Navia <correos@gabrielnav.es>  Wed, 28 May 2026 18:00:00 +0200
