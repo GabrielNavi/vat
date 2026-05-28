@@ -1,0 +1,348 @@
+# VAT_PRESETS — Fichero de referencia de presets para vx-dga-l-vat
+#
+# Formato:  YAML 1.2
+# Versión:  1
+# Ruta activa:       /etc/vat/presets/<nombre>.yaml
+# Ruta de ejemplos:  /usr/share/vat/presets/
+#
+# Uso desde un componente VA*:
+#   echo "$INVENTORY" | vat-operate \
+#       --source-component VAL \
+#       --direction downstream \
+#       --preset centro
+#
+# El binario vat-operate lee stdin (JSON {"clients": [...]}),
+# aplica el preset indicado y escribe el JSON transformado en stdout.
+# Si el preset no existe o falla, comportamiento según fail_mode.
+#
+# Activación en el componente (vac.conf / val.conf / vaf.conf):
+#   USE_VAT=true
+#   VAT_PRESET=centro
+# ─────────────────────────────────────────────────────────────────────────────
+
+version: 1
+
+# ─── Valores por defecto ────────────────────────────────────────────────────
+# Se aplican a todos los presets salvo que el preset los sobreescriba
+# explícitamente con su propio bloque de la misma clave.
+defaults:
+
+  # fail_mode: qué hacer si vat-operate encuentra un error en el pipeline.
+  #   passthrough → devuelve el JSON original sin modificar (recomendado en
+  #                 producción: nunca bloquea el ciclo del daemon).
+  #   abort       → sale con código 1; el componente decide qué hacer.
+  #   drop        → devuelve {"clients": []} (lista vacía).
+  fail_mode: passthrough
+
+  # log_level: verbosidad del propio vat-operate.
+  #   no      → silencio total.
+  #   normal  → errores y transformaciones aplicadas.
+  #   debug   → pipeline paso a paso, útil durante el desarrollo del preset.
+  log_level: normal
+
+  # enabled: interruptor global. false desactiva todos los presets sin borrarlos.
+  enabled: true
+
+
+# ─── Presets ─────────────────────────────────────────────────────────────────
+# Cada preset tiene un nombre único (clave de mapa YAML) y define:
+#   description  → texto libre para documentación y logs.
+#   direction    → upstream | downstream | both
+#                  upstream:   datos que suben (VAF → UPPER_VAS).
+#                  downstream: datos que bajan (VAL → hooks, VAC → clients.json).
+#                  both:       se aplica en ambas direcciones.
+#   enabled      → true/false; sobreescribe el default global.
+#   fail_mode    → sobreescribe el default global para este preset.
+#   match        → criterios para seleccionar este preset según el contexto
+#                  de invocación (--source-component y --direction).
+#   pipeline     → lista ordenada de pasos de transformación.
+#                  Los pasos se aplican en orden; la salida de cada uno
+#                  es la entrada del siguiente.
+presets:
+
+  # ── Preset 1: aula_upstream_minimal ────────────────────────────────────────
+  # Caso de uso: un nodo VAF de aula enviando inventario al VAS de centro.
+  # Objetivo: reducir el volumen y renombrar claves antes de subir,
+  # manteniendo solo los campos relevantes para el nivel superior.
+  aula_upstream_minimal:
+    description: "Inventario de aula hacia centro/VAS superior: renombrado y reducción de campos"
+    direction: upstream
+    enabled: true
+    fail_mode: passthrough  # nunca bloquear el ciclo de VAF
+
+    match:
+      # source_component: lista de componentes desde los que se puede invocar
+      # este preset. Valores válidos del ecosistema actual:
+      #   VAS → servidor de registro (sirve GET /clients)
+      #   VAC → cliente (opera sobre su clients.json local)
+      #   VAL → listener/consumer (opera antes de dispatchar hooks)
+      #   VAF → federated (opera sobre el extra antes de enviarlo a UPPER_VAS)
+      # Nota: VCD y VAR son alias históricos de VAL; no usar en presets nuevos.
+      source_component: [VAC, VAS, VAF]
+
+    pipeline:
+
+      # ── step: transform ────────────────────────────────────────────────────
+      # Renombra claves dentro de extra_imperative y extra_informative.
+      # Se aplica sobre los campos extra de CADA cliente del array, no sobre
+      # el objeto raíz del inventario.
+      #
+      # Semántica de defaults.drop:
+      #   Cualquier clave de extra_imperative/informative que no aparezca
+      #   en una regla from/to explícita es eliminada del resultado.
+      #   Equivale a un whitelist implícito tras el renombrado.
+      #   Si defaults.drop es false (o ausente), las claves no listadas
+      #   se conservan sin modificar.
+      - step: transform
+        config:
+          imperative:
+            - from: "aula1"         # clave original en extra_imperative
+              to:   "A1"            # clave en el JSON resultante
+            # añadir más reglas según las claves que use cada productor VAC
+          informative:
+            - from: "impresoras_cups"
+              to:   "printers"
+          defaults:
+            - from: "*"             # comodín: cualquier clave no listada arriba
+              drop: true            # eliminarla del resultado
+
+      # ── step: filter_keys ──────────────────────────────────────────────────
+      # Controla qué campos de cada cliente se incluyen en el resultado.
+      #
+      # keep_metadata: si true, los campos de identidad del cliente se conservan
+      #   siempre, independientemente del modo y las paths listadas.
+      #   Campos de identidad: hostname, ip, mac, status, last_seen.
+      #   IMPORTANTE: el UUID (id) NO está presente en GET /clients de VAS
+      #   por diseño (mínima exposición de datos). No asumir que keep_metadata
+      #   garantiza el UUID — este campo no existe en el JSON de entrada.
+      #
+      # mode:
+      #   whitelist → solo se incluyen las paths listadas (+ metadata si true).
+      #   blacklist → se eliminan las paths listadas; el resto se conserva.
+      #
+      # paths: rutas dentro de extra_imperative / extra_informative.
+      #   Notación de punto para campos anidados: "hardware.cpu"
+      #   Comodín de prefijo no soportado en v1; usar jq_arbitrary si es necesario.
+      - step: filter_keys
+        config:
+          keep_metadata: true
+          mode: whitelist
+          paths:
+            imperative:
+              - "A1"          # clave ya renombrada por el paso transform
+            informative:
+              - "printers"
+
+      # ── step: select_clients ───────────────────────────────────────────────
+      # Filtra qué clientes del array se incluyen en el resultado.
+      # Todos los criterios son opcionales y se combinan con AND lógico.
+      #
+      # status:    conservar solo clientes con este estado en VAS.
+      #            Valores: active | inactive | archived | all
+      # ip_prefix: conservar solo clientes cuya IP comience con este prefijo.
+      # has_key:   conservar solo clientes que tengan esta clave en
+      #            extra_imperative O en extra_informative.
+      # limit:     número máximo de clientes en el resultado.
+      #            Si se supera, se conservan los primeros N por orden de
+      #            aparición en el JSON (orden de last_seen descendente en VAS).
+      - step: select_clients
+        config:
+          status: active
+          # ip_prefix: "192.168.1."
+          # has_key: "A1"
+          limit: 100
+
+      # ── step: truncate_lists ───────────────────────────────────────────────
+      # Limita el número de elementos en listas dentro de los campos extra.
+      # Útil cuando un productor puede generar arrays de longitud variable
+      # (impresoras, usuarios, etc.) y no queremos enviar listas enormes upstream.
+      #
+      # max_items_global (bloque imperative o informative): límite total de
+      #   elementos en TODAS las listas del bloque. Trunca por orden léxico
+      #   de clave si hay que elegir qué lista recortar primero.
+      #
+      # path + max_items: límite específico para una lista concreta.
+      #   Trunca los elementos sobrantes desde el final de la lista.
+      - step: truncate_lists
+        config:
+          # imperative:
+          #   max_items_global: 200
+          informative:
+            - path: "printers"
+              max_items: 5
+
+
+  # ── Preset 2: centro_downstream_detallado ──────────────────────────────────
+  # Caso de uso: VAL en el servidor de centro distribuyendo inventario a hooks.
+  # Objetivo: mantener el detalle completo pero anonimizar campos sensibles
+  # antes de que lleguen a hooks que podrían escribir en ficheros externos.
+  centro_downstream_detallado:
+    description: "Inventario de centro hacia hooks de VAL: detalle completo con anonimización"
+    direction: downstream
+    enabled: true
+    match:
+      source_component: [VAS, VAL]
+
+    pipeline:
+
+      # ── step: anonymize ────────────────────────────────────────────────────
+      # Anonimiza campos concretos de cada cliente.
+      #
+      # mode:
+      #   hash   → sustituye el valor por su hash. El resultado es reproducible
+      #            dado el mismo input (ver deterministic).
+      #   redact → sustituye el valor por redact_token (ej: "***").
+      #            Irreversible; útil cuando la correlación no es necesaria.
+      #
+      # hash_algo: algoritmo de hash cuando mode=hash.
+      #   sha256 es el valor recomendado. md5 solo para compatibilidad legacy.
+      #
+      # deterministic: relevante solo con mode=hash.
+      #   true  → mismo input produce siempre el mismo hash (sin salt).
+      #            Permite correlacionar registros de distintos ciclos o
+      #            componentes sin exponer el valor real.
+      #            AVISO RGPD: si el espacio de valores es pequeño (ej:
+      #            hostnames predecibles como "pc-001"..."pc-030"), el hash
+      #            es reversible por fuerza bruta. Valorar redact en su lugar.
+      #   false → se añade un salt aleatorio por ejecución. Mejor para
+      #            privacidad estricta; imposibilita la correlación entre ciclos.
+      #
+      # fields: lista de rutas (notación de punto) a anonimizar.
+      #   Se aplica sobre cada cliente del array.
+      #   Si la ruta no existe en un cliente, se ignora silenciosamente.
+      - step: anonymize
+        config:
+          mode: hash
+          hash_algo: sha256
+          deterministic: true   # permite correlación; ver aviso RGPD arriba
+          redact_token: "***"   # usado solo si mode: redact
+          fields:
+            - "hostname"
+            - "extra_imperative.user"
+
+
+  # ── Preset 3: regional_downstream_public ───────────────────────────────────
+  # Caso de uso: VAL en nivel regional sirviendo a consumidores externos
+  # (dashboards, APIs de terceros) que no deben recibir datos profundamente
+  # anidados ni campos no validados.
+  regional_downstream_public:
+    description: "Vista pública reducida desde VAL regional hacia consumidores externos"
+    direction: downstream
+    enabled: true
+    fail_mode: passthrough
+    match:
+      source_component: [VAL]
+
+    pipeline:
+
+      # ── step: limit_depth ──────────────────────────────────────────────────
+      # Limita la profundidad de anidamiento de los objetos JSON.
+      # Útil para evitar que inventarios federados (VAF anida sub-inventarios
+      # dentro de extra_imperative) expongan estructuras demasiado profundas
+      # a consumidores que no esperan ese nivel de detalle.
+      #
+      # max_depth: profundidad máxima permitida desde la raíz del objeto
+      #   cliente. Nivel 1 = campos directos (hostname, ip, extra_imperative).
+      #   Nivel 2 = campos dentro de extra_imperative. Etc.
+      #
+      # strategy:
+      #   truncate   → elimina los nodos más profundos que max_depth.
+      #   stringify  → serializa los nodos más profundos como string JSON.
+      #                Preserva la información pero la hace opaca para parsers.
+      #
+      # paths_exempt: lista de rutas que se excluyen del límite de profundidad.
+      #   Útil para preservar campos concretos que se sabe que son profundos
+      #   y que el consumidor necesita tal cual.
+      - step: limit_depth
+        config:
+          max_depth: 3
+          strategy: stringify
+          paths_exempt:
+            - "extra_imperative.aula"
+
+      # ── step: json_schema_validation ───────────────────────────────────────
+      # Valida el JSON resultante contra un esquema JSON Schema (draft-07).
+      # Ejecuta DESPUÉS de las transformaciones para validar el output,
+      # no el input.
+      #
+      # schema: ruta absoluta al fichero .json del esquema.
+      #   Rutas recomendadas:
+      #     /usr/share/vat/schemas/  → esquemas distribuidos con el paquete.
+      #     /etc/vat/schemas/        → esquemas locales del administrador.
+      #   Ruta relativa NO soportada en v1 (ambigüedad de CWD en servicios
+      #   systemd sin WorkingDirectory garantizado).
+      #
+      # fail_mode: sobreescribe el fail_mode del preset para este paso.
+      #   drop → si la validación falla, el cliente concreto se elimina del
+      #          array (los demás pasan). Útil para filtrar malformados.
+      #   abort / passthrough → aplica al inventario completo.
+      - step: json_schema_validation
+        config:
+          schema: "/usr/share/vat/schemas/clients_v1.json"
+          fail_mode: drop       # clientes que no pasen el schema se descartan
+
+      # ── step: jq_arbitrary ─────────────────────────────────────────────────
+      # Escape hatch: filtro jq arbitrario aplicado al JSON completo
+      # {"clients": [...]}.
+      # Usar cuando ninguno de los pasos estructurados cubre el caso.
+      #
+      # filter: expresión jq válida. Se ejecuta con jq -c en un subproceso.
+      #   El input es el JSON del inventario en el estado en que llega a este
+      #   paso (ya transformado por los pasos anteriores).
+      #   El output debe mantener el schema {"clients": [...]}.
+      #
+      # AVISO: jq_arbitrary no puede combinarse con source_component ni
+      #   direction dentro del filtro — VAT ya habrá enrutado correctamente
+      #   antes de llegar aquí. El filtro opera sobre datos puros.
+      - step: jq_arbitrary
+        config:
+          filter: '.clients |= map(.extra_imperative.region = "centro-norte")'
+          # Ejemplo alternativo — leer el filtro desde fichero externo:
+          # filter_file: "/etc/vat/filters/add_region.jq"
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# NOTAS DE DISEÑO
+#
+# Schema de entrada esperado por vat-operate:
+#   {"clients": [
+#     {
+#       "hostname":          "equipo01.aula3",
+#       "ip":                "192.168.3.1",
+#       "mac":               "aa:bb:cc:dd:ee:01",
+#       "status":            "active",
+#       "last_seen":         "2026-05-28T10:00:00",
+#       "extra_imperative":  { ... } | null,
+#       "extra_informative": { ... } | null
+#     }
+#   ]}
+#
+#   IMPORTANTE: el campo "id" (UUID) NO está presente. VAS no lo incluye en
+#   GET /clients por diseño (mínima exposición de datos). Solo disponible
+#   en GET /clients/{UUID}. Ningún paso de VAT puede asumir su presencia.
+#
+# Orden de aplicación de los pasos:
+#   Los pasos se aplican estrictamente en el orden en que aparecen en el
+#   pipeline. El output de cada paso es el input del siguiente.
+#   Recomendación de ordenación:
+#     1. select_clients  (reducir el array primero, menos trabajo para los siguientes)
+#     2. filter_keys     (eliminar campos antes de transformar)
+#     3. transform       (renombrar sobre el conjunto ya reducido)
+#     4. truncate_lists  (limitar arrays en los extras ya filtrados)
+#     5. anonymize       (sobre los datos definitivos)
+#     6. limit_depth     (como último paso de forma, no de contenido)
+#     7. json_schema_validation (validar el resultado final)
+#     8. jq_arbitrary    (ajustes de último recurso)
+#
+# Múltiples presets por fichero vs. un preset por fichero:
+#   Ambas formas son válidas. vat-operate carga todos los ficheros *.yaml
+#   de /etc/vat/presets/ y busca el preset por nombre en el conjunto.
+#   Si el mismo nombre aparece en dos ficheros, el de /etc/ tiene precedencia
+#   sobre /usr/share/. Dentro de /etc/, el más específico (basename
+#   lexicalmente mayor) sobreescribe al anterior.
+#
+# Compatibilidad hacia adelante:
+#   Los campos desconocidos en un paso se ignoran silenciosamente (no error).
+#   Los pasos desconocidos emiten [VAT-WARN] y se saltan (no abortan el
+#   pipeline) salvo que fail_mode sea abort.
+# ─────────────────────────────────────────────────────────────────────────────

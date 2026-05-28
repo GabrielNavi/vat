@@ -1,0 +1,130 @@
+#!/bin/bash
+# vat-operate — VAT JSON transformer
+#
+# Lee un inventario JSON {"clients": [...]} desde stdin, localiza el preset
+# indicado en /etc/vat/presets.d/ o /usr/share/vat/presets/, aplica el
+# pipeline de transformaciones definido y escribe el resultado en stdout.
+#
+# Uso:
+#   echo "$INVENTORY" | vat-operate \
+#       --source-component VAL \
+#       --direction downstream \
+#       --preset centro
+#
+# Argumentos:
+#   --source-component  Componente que invoca la transformacion.
+#                       Valores: VAS | VAC | VAL | VAF
+#   --direction         Sentido del flujo de datos.
+#                       Valores: upstream | downstream | both
+#   --preset            Nombre del preset a aplicar (sin extension .yaml).
+#
+# Salida:
+#   stdout → JSON transformado (mismo schema de entrada: {"clients": [...]})
+#   stderr → mensajes de log [VAT] / [VAT-ERROR]
+#   exit 0 → transformacion aplicada o passthrough (segun fail_mode del preset)
+#   exit 1 → error irrecuperable (argumento invalido, preset no encontrado
+#             y fail_mode=abort)
+#
+# Journalctl (cuando se invoca desde un servicio systemd):
+#   journalctl -u val -f | grep '\[VAT\]'
+
+set -euo pipefail
+
+# ---------------------------------------------------------------------------
+# Constantes de rutas
+# ---------------------------------------------------------------------------
+PRESETS_SYSTEM_DIR="/usr/share/vat/presets"
+PRESETS_LOCAL_DIR="/etc/vat/presets.d"
+
+# ---------------------------------------------------------------------------
+# Logging
+# ---------------------------------------------------------------------------
+log()       { echo "[VAT] $*" >&2; }
+log_error() { echo "[VAT-ERROR] $*" >&2; }
+
+# ---------------------------------------------------------------------------
+# Parseo de argumentos
+# ---------------------------------------------------------------------------
+SOURCE_COMPONENT=""
+DIRECTION=""
+PRESET=""
+
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --source-component) SOURCE_COMPONENT="$2"; shift 2 ;;
+        --direction)        DIRECTION="$2";        shift 2 ;;
+        --preset)           PRESET="$2";           shift 2 ;;
+        -h|--help)
+            echo "Uso: echo \"\$JSON\" | vat-operate --source-component <c> --direction <d> --preset <p>"
+            exit 0
+            ;;
+        *)
+            log_error "Argumento desconocido: '$1'"
+            exit 1
+            ;;
+    esac
+done
+
+# ---------------------------------------------------------------------------
+# Validaciones
+# ---------------------------------------------------------------------------
+if [[ -z "$PRESET" ]]; then
+    log_error "--preset es obligatorio."
+    exit 1
+fi
+
+if [[ -n "$SOURCE_COMPONENT" ]]; then
+    case "$SOURCE_COMPONENT" in
+        VAS|VAC|VAL|VAF) ;;
+        *)
+            log_error "source-component invalido: '$SOURCE_COMPONENT'. Valores: VAS VAC VAL VAF"
+            exit 1
+            ;;
+    esac
+fi
+
+if [[ -n "$DIRECTION" ]]; then
+    case "$DIRECTION" in
+        upstream|downstream|both) ;;
+        *)
+            log_error "direction invalida: '$DIRECTION'. Valores: upstream downstream both"
+            exit 1
+            ;;
+    esac
+fi
+
+# ---------------------------------------------------------------------------
+# Localizar el preset
+# ---------------------------------------------------------------------------
+# Precedencia: /etc/vat/presets.d/ (local) sobre /usr/share/vat/presets/ (sistema)
+PRESET_FILE=""
+
+if [[ -f "${PRESETS_LOCAL_DIR}/${PRESET}.yaml" ]]; then
+    PRESET_FILE="${PRESETS_LOCAL_DIR}/${PRESET}.yaml"
+elif [[ -f "${PRESETS_SYSTEM_DIR}/${PRESET}.yaml" ]]; then
+    PRESET_FILE="${PRESETS_SYSTEM_DIR}/${PRESET}.yaml"
+fi
+
+if [[ -z "$PRESET_FILE" ]]; then
+    log_error "Preset '${PRESET}' no encontrado en ${PRESETS_LOCAL_DIR}/ ni en ${PRESETS_SYSTEM_DIR}/."
+    # fail_mode por defecto: passthrough (el default del sistema)
+    # Sin fichero de preset no podemos leer fail_mode → passthrough siempre.
+    cat
+    exit 0
+fi
+
+log "Preset: $PRESET_FILE (component=$SOURCE_COMPONENT direction=$DIRECTION)"
+
+# ---------------------------------------------------------------------------
+# TODO: implementar el motor de transformación
+#
+# El motor debe:
+#   1. Parsear el YAML del preset con yq o con un parser Bash ligero.
+#   2. Verificar que el preset aplica al source_component y direction indicados
+#      (bloque match.source_component y direction del preset).
+#   3. Ejecutar cada paso del pipeline en orden, encadenando stdin→stdout.
+#   4. Respetar fail_mode (passthrough | abort | drop) ante errores de paso.
+#
+# Implementación provisional: passthrough completo.
+# ---------------------------------------------------------------------------
+cat

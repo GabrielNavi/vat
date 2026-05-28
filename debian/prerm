@@ -1,0 +1,6 @@
+#!/bin/sh
+set -e
+
+echo "[VAT] Ejecutando prerm..."
+
+exit 0

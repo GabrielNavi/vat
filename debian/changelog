@@ -1,0 +1,13 @@
+vx-dga-l-vat (0.1-1) unstable; urgency=low
+
+  * Initial release.
+  * vat-operate: stub del transformador de inventarios JSON del ecosistema VA*.
+    Lee stdin ({"clients": [...]}), aplica el preset YAML indicado y escribe
+    el resultado en stdout. La logica de transformacion se implementara en
+    versiones posteriores; esta version es passthrough completo.
+  * Estructura de presets: /etc/vat/presets.d/ para presets del administrador,
+    /usr/share/vat/presets/ para presets de referencia distribuidos con el paquete.
+  * Preset de referencia: /usr/share/vat/presets/example.yaml con documentacion
+    completa de todas las operaciones disponibles (version futura).
+
+ -- Gabriel Navia <correos@gabrielnav.es>  Wed, 28 May 2026 18:00:00 +0200

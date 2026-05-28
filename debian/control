@@ -1,0 +1,29 @@
+Source: vx-dga-l-vat
+Section: admin
+Priority: optional
+Maintainer: Gabriel Navia <correos@gabrielnav.es>
+Standards-Version: 4.7.0
+Build-Depends: debhelper-compat (= 13)
+
+Package: vx-dga-l-vat
+Architecture: all
+Depends: bash, jq
+Recommends: vx-dga-l-val | vx-dga-l-vaf
+Description: Versatile Autoregistration Transformer (VAT)
+ Transformador de inventarios JSON del ecosistema VA*. Lee un inventario
+ {"clients": [...]} desde stdin, aplica un preset de transformacion YAML
+ y escribe el resultado en stdout.
+ .
+ Permite redactar, filtrar, renombrar, truncar y anonimizar campos del
+ inventario antes de que lleguen a hooks (VAL), al VAS superior (VAF)
+ o a cualquier consumidor externo, sin modificar la fuente canonica (VAS).
+ .
+ Uso tipico desde VAL o VAF:
+  echo "$INVENTORY" | vat-operate \
+    --source-component VAL \
+    --direction downstream \
+    --preset centro
+ .
+ Activacion en el componente (val.conf / vaf.conf):
+  USE_VAT=true
+  VAT_PRESET=centro

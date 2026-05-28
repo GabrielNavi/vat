@@ -1,0 +1,10 @@
+#!/bin/sh
+set -e
+
+echo "[VAT] Ejecutando postrm..."
+
+if [ "$1" = "purge" ]; then
+    rm -rf /etc/vat
+fi
+
+exit 0
