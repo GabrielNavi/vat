@@ -1,9 +1,10 @@
 #!/bin/bash
 # vat-operate — VAT JSON transformer
 #
-# Lee un inventario JSON {"clients": [...]} desde stdin, localiza el preset
-# indicado en /etc/vat/presets.d/ o /usr/share/vat/presets/, aplica el
-# pipeline de transformaciones definido y escribe el resultado en stdout.
+# Lee {"clients": [...]} desde stdin, aplica el preset YAML indicado y
+# escribe el resultado en stdout. Garantiza que el payload mínimo VA*
+# (hostname / ip / mac / status / last_seen / extra_imperative /
+# extra_informative) está siempre presente en cada cliente del resultado.
 #
 # Uso:
 #   echo "$INVENTORY" | vat-operate \
@@ -11,36 +12,28 @@
 #       --direction downstream \
 #       --preset centro
 #
-# Argumentos:
-#   --source-component  Componente que invoca la transformacion.
-#                       Valores: VAS | VAC | VAL | VAF
-#   --direction         Sentido del flujo de datos.
-#                       Valores: upstream | downstream | both
-#   --preset            Nombre del preset a aplicar (sin extension .yaml).
-#
-# Salida:
-#   stdout → JSON transformado (mismo schema de entrada: {"clients": [...]})
-#   stderr → mensajes de log [VAT] / [VAT-ERROR]
-#   exit 0 → transformacion aplicada o passthrough (segun fail_mode del preset)
-#   exit 1 → error irrecuperable (argumento invalido, preset no encontrado
-#             y fail_mode=abort)
-#
-# Journalctl (cuando se invoca desde un servicio systemd):
-#   journalctl -u val -f | grep '\[VAT\]'
+# exit 0 → JSON transformado (o passthrough si fail_mode=passthrough)
+# exit 1 → error irrecuperable (argumento inválido, fail_mode=abort)
 
 set -euo pipefail
 
 # ---------------------------------------------------------------------------
-# Constantes de rutas
+# Constantes
 # ---------------------------------------------------------------------------
-PRESETS_SYSTEM_DIR="/usr/share/vat/presets"
 PRESETS_LOCAL_DIR="/etc/vat/presets.d"
+PRESETS_SYSTEM_DIR="/usr/share/vat/presets"
+
+# Campos de identidad del payload VA* que nunca se pueden eliminar.
+# No incluye "id" (UUID): VAS no lo expone en GET /clients por diseño.
+readonly VA_METADATA_FIELDS='["hostname","ip","mac","status","last_seen","extra_imperative","extra_informative"]'
 
 # ---------------------------------------------------------------------------
 # Logging
 # ---------------------------------------------------------------------------
-log()       { echo "[VAT] $*" >&2; }
+log()       { echo "[VAT] $*"       >&2; }
+log_debug() { [[ "${VAT_LOG_LEVEL:-normal}" == "debug" ]] && echo "[VAT] [DEBUG] $*" >&2 || true; }
 log_error() { echo "[VAT-ERROR] $*" >&2; }
+log_warn()  { echo "[VAT-WARN] $*"  >&2; }
 
 # ---------------------------------------------------------------------------
 # Parseo de argumentos
@@ -56,18 +49,11 @@ while [[ $# -gt 0 ]]; do
         --preset)           PRESET="$2";           shift 2 ;;
         -h|--help)
             echo "Uso: echo \"\$JSON\" | vat-operate --source-component <c> --direction <d> --preset <p>"
-            exit 0
-            ;;
-        *)
-            log_error "Argumento desconocido: '$1'"
-            exit 1
-            ;;
+            exit 0 ;;
+        *) log_error "Argumento desconocido: '$1'"; exit 1 ;;
     esac
 done
 
-# ---------------------------------------------------------------------------
-# Validaciones
-# ---------------------------------------------------------------------------
 if [[ -z "$PRESET" ]]; then
     log_error "--preset es obligatorio."
     exit 1
@@ -76,55 +62,610 @@ fi
 if [[ -n "$SOURCE_COMPONENT" ]]; then
     case "$SOURCE_COMPONENT" in
         VAS|VAC|VAL|VAF) ;;
-        *)
-            log_error "source-component invalido: '$SOURCE_COMPONENT'. Valores: VAS VAC VAL VAF"
-            exit 1
-            ;;
+        *) log_error "source-component inválido: '$SOURCE_COMPONENT'. Valores: VAS VAC VAL VAF"; exit 1 ;;
     esac
 fi
 
 if [[ -n "$DIRECTION" ]]; then
     case "$DIRECTION" in
         upstream|downstream|both) ;;
-        *)
-            log_error "direction invalida: '$DIRECTION'. Valores: upstream downstream both"
-            exit 1
-            ;;
+        *) log_error "direction inválida: '$DIRECTION'. Valores: upstream downstream both"; exit 1 ;;
     esac
 fi
 
 # ---------------------------------------------------------------------------
-# Localizar el preset
+# Leer stdin antes de cualquier cosa (evitar pérdida si algo falla después)
 # ---------------------------------------------------------------------------
-# Precedencia: /etc/vat/presets.d/ (local) sobre /usr/share/vat/presets/ (sistema)
-PRESET_FILE=""
+INVENTORY="$(cat)"
 
-if [[ -f "${PRESETS_LOCAL_DIR}/${PRESET}.yaml" ]]; then
+# ---------------------------------------------------------------------------
+# Helper: aplicar fail_mode
+# ---------------------------------------------------------------------------
+apply_fail_mode() {
+    local mode="$1"
+    local reason="$2"
+    log_error "$reason"
+    case "$mode" in
+        abort)       exit 1 ;;
+        drop)        echo '{"clients":[]}'; exit 0 ;;
+        passthrough) echo "$INVENTORY";    exit 0 ;;
+        *)           echo "$INVENTORY";    exit 0 ;;
+    esac
+}
+
+# ---------------------------------------------------------------------------
+# Validar schema mínimo del inventario de entrada
+# ---------------------------------------------------------------------------
+if ! echo "$INVENTORY" | jq -e '.clients | arrays' > /dev/null 2>&1; then
+    log_error "El JSON de entrada no tiene el schema VA* esperado: {\"clients\": [...]}."
+    echo "$INVENTORY"
+    exit 1
+fi
+
+# ---------------------------------------------------------------------------
+# Localizar fichero de preset (local > sistema)
+# ---------------------------------------------------------------------------
+PRESET_FILE=""
+if   [[ -f "${PRESETS_LOCAL_DIR}/${PRESET}.yaml"  ]]; then
     PRESET_FILE="${PRESETS_LOCAL_DIR}/${PRESET}.yaml"
 elif [[ -f "${PRESETS_SYSTEM_DIR}/${PRESET}.yaml" ]]; then
     PRESET_FILE="${PRESETS_SYSTEM_DIR}/${PRESET}.yaml"
 fi
 
 if [[ -z "$PRESET_FILE" ]]; then
-    log_error "Preset '${PRESET}' no encontrado en ${PRESETS_LOCAL_DIR}/ ni en ${PRESETS_SYSTEM_DIR}/."
-    # fail_mode por defecto: passthrough (el default del sistema)
-    # Sin fichero de preset no podemos leer fail_mode → passthrough siempre.
-    cat
+    log_warn "Preset '${PRESET}' no encontrado. Passthrough."
+    echo "$INVENTORY"
     exit 0
 fi
 
-log "Preset: $PRESET_FILE (component=$SOURCE_COMPONENT direction=$DIRECTION)"
+log "Preset: $PRESET_FILE"
 
 # ---------------------------------------------------------------------------
-# TODO: implementar el motor de transformación
-#
-# El motor debe:
-#   1. Parsear el YAML del preset con yq o con un parser Bash ligero.
-#   2. Verificar que el preset aplica al source_component y direction indicados
-#      (bloque match.source_component y direction del preset).
-#   3. Ejecutar cada paso del pipeline en orden, encadenando stdin→stdout.
-#   4. Respetar fail_mode (passthrough | abort | drop) ante errores de paso.
-#
-# Implementación provisional: passthrough completo.
+# Convertir YAML → JSON con yq
 # ---------------------------------------------------------------------------
-cat
+if ! PRESET_JSON="$(yq -o json '.' "$PRESET_FILE" 2>/dev/null)"; then
+    log_error "Error parseando YAML: $PRESET_FILE"
+    echo "$INVENTORY"
+    exit 0
+fi
+
+# ---------------------------------------------------------------------------
+# Extraer el preset nombrado del fichero
+# ---------------------------------------------------------------------------
+PRESET_DATA="$(echo "$PRESET_JSON" | jq -c --arg n "$PRESET" '.presets[$n] // empty' 2>/dev/null || true)"
+
+if [[ -z "$PRESET_DATA" ]]; then
+    log_warn "Preset '$PRESET' no encontrado dentro de $PRESET_FILE. Passthrough."
+    echo "$INVENTORY"
+    exit 0
+fi
+
+# ---------------------------------------------------------------------------
+# Resolver fail_mode: preset > defaults > passthrough
+# ---------------------------------------------------------------------------
+FAIL_MODE="$(echo "$PRESET_JSON" | jq -r --arg n "$PRESET" '
+    .presets[$n].fail_mode
+    // .defaults.fail_mode
+    // "passthrough"
+' 2>/dev/null || echo "passthrough")"
+
+# ---------------------------------------------------------------------------
+# Resolver log_level efectivo
+# ---------------------------------------------------------------------------
+VAT_LOG_LEVEL="$(echo "$PRESET_JSON" | jq -r --arg n "$PRESET" '
+    .presets[$n].log_level
+    // .defaults.log_level
+    // "normal"
+' 2>/dev/null || echo "normal")"
+
+# ---------------------------------------------------------------------------
+# Comprobar enabled
+# ---------------------------------------------------------------------------
+ENABLED="$(echo "$PRESET_JSON" | jq -r --arg n "$PRESET" '
+    .presets[$n].enabled
+    // .defaults.enabled
+    // true
+' 2>/dev/null || echo "true")"
+
+if [[ "$ENABLED" != "true" ]]; then
+    log "Preset '$PRESET' desactivado (enabled=false). Passthrough."
+    echo "$INVENTORY"
+    exit 0
+fi
+
+# ---------------------------------------------------------------------------
+# Comprobar match.source_component
+# ---------------------------------------------------------------------------
+if [[ -n "$SOURCE_COMPONENT" ]]; then
+    MATCH_COMPONENTS="$(echo "$PRESET_DATA" | jq -r '.match.source_component // [] | @json' 2>/dev/null || echo "[]")"
+    COUNT="$(echo "$MATCH_COMPONENTS" | jq --arg c "$SOURCE_COMPONENT" 'map(select(. == $c)) | length' 2>/dev/null || echo "0")"
+    if [[ "$COUNT" -eq 0 && "$MATCH_COMPONENTS" != "[]" ]]; then
+        log_debug "source_component '$SOURCE_COMPONENT' no coincide con match del preset. Passthrough."
+        echo "$INVENTORY"
+        exit 0
+    fi
+fi
+
+# ---------------------------------------------------------------------------
+# Comprobar match.direction
+# ---------------------------------------------------------------------------
+PRESET_DIRECTION="$(echo "$PRESET_DATA" | jq -r '.direction // "both"' 2>/dev/null || echo "both")"
+if [[ -n "$DIRECTION" && "$PRESET_DIRECTION" != "both" && "$PRESET_DIRECTION" != "$DIRECTION" ]]; then
+    log_debug "direction '$DIRECTION' no coincide con preset ($PRESET_DIRECTION). Passthrough."
+    echo "$INVENTORY"
+    exit 0
+fi
+
+log_debug "Preset validado. fail_mode=$FAIL_MODE component=$SOURCE_COMPONENT direction=$DIRECTION"
+
+# ---------------------------------------------------------------------------
+# Guardia de metadata: restaura los campos VA* que un paso pudiera haber
+# eliminado. Opera sobre el resultado final del pipeline.
+# ---------------------------------------------------------------------------
+enforce_metadata() {
+    local result="$1"
+    local original="$2"
+    # Para cada cliente en el resultado, asegura que los campos de identidad
+    # están presentes. Si faltan, los restaura desde el cliente original en
+    # la misma posición del array. Esto solo ocurre si un paso fue demasiado
+    # agresivo; en operación normal esta función no modifica nada.
+    jq -c \
+        --argjson orig   "$original" \
+        --argjson meta   "$VA_METADATA_FIELDS" \
+        '
+        .clients = [
+            .clients | to_entries[] |
+            .key   as $idx  |
+            .value as $client |
+            ($orig.clients[$idx] // {}) as $src |
+            reduce $meta[] as $f (
+                $client;
+                if .[$f] == null and $src[$f] != null
+                then .[$f] = $src[$f]
+                else .
+                end
+            )
+        ]
+        ' <<< "$result"
+}
+
+# ---------------------------------------------------------------------------
+# Helper: convertir "a.b.c" → array jq ["a","b","c"]
+# ---------------------------------------------------------------------------
+dotpath_to_jq() {
+    # Devuelve la expresión jq getpath(["a","b","c"]) para un campo "a.b.c"
+    local path="$1"
+    echo "$path" | jq -Rc 'split(".")'
+}
+
+# ===========================================================================
+# PASOS DEL PIPELINE
+# ===========================================================================
+
+# ---------------------------------------------------------------------------
+# step: select_clients
+# Filtra qué clientes del array pasan. Criterios combinados con AND.
+# ---------------------------------------------------------------------------
+step_select_clients() {
+    local inventory="$1"
+    local config="$2"
+
+    local status    ; status="$(   echo "$config" | jq -r '.status    // empty')"
+    local ip_prefix ; ip_prefix="$(echo "$config" | jq -r '.ip_prefix // empty')"
+    local has_key   ; has_key="$(  echo "$config" | jq -r '.has_key   // empty')"
+    local limit     ; limit="$(    echo "$config" | jq -r '.limit     // 0')"
+
+    log_debug "[select_clients] status=$status ip_prefix=$ip_prefix has_key=$has_key limit=$limit"
+
+    echo "$inventory" | jq -c \
+        --arg status    "$status"    \
+        --arg ip_prefix "$ip_prefix" \
+        --arg has_key   "$has_key"   \
+        --argjson limit "$limit"     \
+        '
+        .clients |= map(
+            select(
+                ($status    == "" or .status == $status) and
+                ($ip_prefix == "" or (.ip // "" | startswith($ip_prefix))) and
+                ($has_key   == "" or
+                    ((.extra_imperative  // {} | has($has_key)) or
+                     (.extra_informative // {} | has($has_key))))
+            )
+        ) |
+        if $limit > 0 then .clients |= .[:$limit] else . end
+        '
+}
+
+# ---------------------------------------------------------------------------
+# step: filter_keys
+# Controla qué campos de los extras de cada cliente se incluyen.
+# keep_metadata=true (defecto) garantiza que los campos VA* nunca se tocan.
+# ---------------------------------------------------------------------------
+step_filter_keys() {
+    local inventory="$1"
+    local config="$2"
+
+    local mode          ; mode="$(         echo "$config" | jq -r '.mode           // "whitelist"')"
+    local keep_metadata ; keep_metadata="$(echo "$config" | jq -r '.keep_metadata  // true')"
+    local imp_paths     ; imp_paths="$(    echo "$config" | jq -c '.paths.imperative  // []')"
+    local inf_paths     ; inf_paths="$(    echo "$config" | jq -c '.paths.informative // []')"
+
+    log_debug "[filter_keys] mode=$mode keep_metadata=$keep_metadata imp=$imp_paths inf=$inf_paths"
+
+    echo "$inventory" | jq -c \
+        --arg     mode          "$mode"          \
+        --argjson imp_paths     "$imp_paths"      \
+        --argjson inf_paths     "$inf_paths"      \
+        --argjson keep_metadata "$keep_metadata"  \
+        --argjson meta          "$VA_METADATA_FIELDS" \
+        '
+        def filter_extra(paths; mode):
+            if paths == [] then .
+            elif mode == "whitelist" then
+                with_entries(select(.key as $k | paths | any(. == $k)))
+            else  # blacklist
+                with_entries(select(.key as $k | paths | all(. != $k)))
+            end;
+
+        .clients |= map(
+            .extra_imperative  = (.extra_imperative  // {} | filter_extra($imp_paths; $mode)) |
+            .extra_informative = (.extra_informative // {} | filter_extra($inf_paths; $mode)) |
+            # Normalizar objetos vacíos a null
+            if .extra_imperative  == {} then .extra_imperative  = null else . end |
+            if .extra_informative == {} then .extra_informative = null else . end
+        )
+        '
+}
+
+# ---------------------------------------------------------------------------
+# step: transform
+# Renombra claves en los extras. Con defaults.drop=true, elimina las claves
+# no listadas en ninguna regla from/to (whitelist implícito tras renombrado).
+# ---------------------------------------------------------------------------
+step_transform() {
+    local inventory="$1"
+    local config="$2"
+
+    local imp_rules ; imp_rules="$( echo "$config" | jq -c '.imperative  // []')"
+    local inf_rules ; inf_rules="$( echo "$config" | jq -c '.informative // []')"
+    local drop      ; drop="$(      echo "$config" | jq -r '.defaults[0].drop // false' 2>/dev/null || echo "false")"
+
+    log_debug "[transform] imp_rules=$imp_rules inf_rules=$inf_rules drop=$drop"
+
+    echo "$inventory" | jq -c \
+        --argjson imp_rules "$imp_rules" \
+        --argjson inf_rules "$inf_rules" \
+        --argjson drop      "$drop"      \
+        '
+        def apply_rename(rules; drop):
+            if . == null then null
+            else
+                # Construir mapa from→to para lookup rápido
+                (rules | map({(.from): .to}) | add // {}) as $rmap |
+                # Claves con regla explícita
+                (rules | map(.from) | unique) as $from_keys |
+
+                with_entries(
+                    if .key as $k | $rmap | has($k) then
+                        .key = $rmap[.key]       # renombrar
+                    elif drop then
+                        empty                    # eliminar si drop=true y no tiene regla
+                    else
+                        .                        # conservar sin cambios
+                    end
+                )
+            end;
+
+        .clients |= map(
+            .extra_imperative  = (.extra_imperative  | apply_rename($imp_rules; $drop)) |
+            .extra_informative = (.extra_informative | apply_rename($inf_rules; $drop))
+        )
+        '
+}
+
+# ---------------------------------------------------------------------------
+# step: truncate_lists
+# Limita el número de elementos en arrays dentro de los extras.
+# ---------------------------------------------------------------------------
+step_truncate_lists() {
+    local inventory="$1"
+    local config="$2"
+
+    local imp_global ; imp_global="$(echo "$config" | jq -r '.imperative.max_items_global  // 0')"
+    local inf_rules  ; inf_rules="$( echo "$config" | jq -c '.informative // []')"
+
+    log_debug "[truncate_lists] imp_global=$imp_global inf_rules=$inf_rules"
+
+    echo "$inventory" | jq -c \
+        --argjson imp_global "$imp_global" \
+        --argjson inf_rules  "$inf_rules"  \
+        '
+        def truncate_arrays(max):
+            if max == 0 then .
+            else
+                walk(if type == "array" and length > max then .[:max] else . end)
+            end;
+
+        def apply_path_rules(rules):
+            if rules == [] then .
+            else
+                reduce rules[] as $rule (
+                    .;
+                    if .[$rule.path] | type == "array" then
+                        .[$rule.path] = .[$rule.path][:.[$rule.path | length] | if . > $rule.max_items then $rule.max_items else . end]
+                        | .[$rule.path] = .[$rule.path][:$rule.max_items]
+                    else . end
+                )
+            end;
+
+        .clients |= map(
+            .extra_imperative  = (.extra_imperative  | if . != null then truncate_arrays($imp_global) else . end) |
+            .extra_informative = (.extra_informative | if . != null then apply_path_rules($inf_rules) else . end)
+        )
+        '
+}
+
+# ---------------------------------------------------------------------------
+# step: anonymize
+# Anonimiza campos de cada cliente por hash (sha256) o redacción.
+# Soporta rutas simples ("hostname") y rutas de un nivel de profundidad
+# ("extra_imperative.user"). Rutas más profundas: usar jq_arbitrary.
+# ---------------------------------------------------------------------------
+step_anonymize() {
+    local inventory="$1"
+    local config="$2"
+
+    local mode          ; mode="$(          echo "$config" | jq -r '.mode           // "hash"')"
+    local algo          ; algo="$(          echo "$config" | jq -r '.hash_algo      // "sha256"')"
+    local deterministic ; deterministic="$( echo "$config" | jq -r '.deterministic  // true')"
+    local redact_token  ; redact_token="$(  echo "$config" | jq -r '.redact_token   // "***"')"
+    local fields        ; fields="$(        echo "$config" | jq -r '.fields[]       // empty' 2>/dev/null || true)"
+
+    log_debug "[anonymize] mode=$mode algo=$algo deterministic=$deterministic fields=$(echo "$fields" | tr '\n' ' ')"
+
+    local result="$inventory"
+
+    while IFS= read -r field; do
+        [[ -z "$field" ]] && continue
+
+        # Separar en parte superior y subruta: "extra_imperative.user" → top=extra_imperative sub=user
+        local top sub
+        top="${field%%.*}"
+        sub="${field#*.}"
+        [[ "$sub" == "$field" ]] && sub=""   # sin punto → campo directo
+
+        if [[ "$mode" == "redact" ]]; then
+            if [[ -z "$sub" ]]; then
+                result="$(echo "$result" | jq -c \
+                    --arg f "$top" --arg t "$redact_token" \
+                    '.clients |= map(if .[$f] != null then .[$f] = $t else . end)')"
+            else
+                result="$(echo "$result" | jq -c \
+                    --arg top "$top" --arg sub "$sub" --arg t "$redact_token" \
+                    '.clients |= map(
+                        if .[$top] != null and (.[$top] | type) == "object" and (.[$top] | has($sub))
+                        then .[$top][$sub] = $t
+                        else . end
+                    )')"
+            fi
+        else
+            # mode=hash: extraer cada valor, hashear, reinsertar
+            local client_count
+            client_count="$(echo "$result" | jq '.clients | length')"
+
+            for (( i=0; i<client_count; i++ )); do
+                local val
+                if [[ -z "$sub" ]]; then
+                    val="$(echo "$result" | jq -r --arg f "$top" --argjson i "$i" '.clients[$i][$f] // empty')"
+                else
+                    val="$(echo "$result" | jq -r --arg top "$top" --arg sub "$sub" --argjson i "$i" \
+                        '.clients[$i][$top][$sub] // empty' 2>/dev/null || true)"
+                fi
+
+                [[ -z "$val" ]] && continue
+
+                local hashed
+                if [[ "$deterministic" == "true" ]]; then
+                    hashed="$(printf '%s' "$val" | sha256sum | awk '{print $1}')"
+                else
+                    local salt
+                    salt="$(head -c 8 /dev/urandom | xxd -p)"
+                    hashed="$(printf '%s%s' "$val" "$salt" | sha256sum | awk '{print $1}')"
+                fi
+
+                if [[ -z "$sub" ]]; then
+                    result="$(echo "$result" | jq -c \
+                        --argjson i "$i" --arg f "$top" --arg h "$hashed" \
+                        '.clients[$i][$f] = $h')"
+                else
+                    result="$(echo "$result" | jq -c \
+                        --argjson i "$i" --arg top "$top" --arg sub "$sub" --arg h "$hashed" \
+                        '.clients[$i][$top][$sub] = $h')"
+                fi
+            done
+        fi
+    done <<< "$fields"
+
+    echo "$result"
+}
+
+# ---------------------------------------------------------------------------
+# step: limit_depth
+# Limita la profundidad de anidamiento. Solo actúa sobre los extras.
+# ---------------------------------------------------------------------------
+step_limit_depth() {
+    local inventory="$1"
+    local config="$2"
+
+    local max_depth ; max_depth="$(echo "$config" | jq -r '.max_depth  // 3')"
+    local strategy  ; strategy="$( echo "$config" | jq -r '.strategy   // "stringify"')"
+
+    log_debug "[limit_depth] max_depth=$max_depth strategy=$strategy"
+
+    echo "$inventory" | jq -c \
+        --argjson max_depth "$max_depth" \
+        --arg     strategy  "$strategy"  \
+        '
+        def depth: . as $x |
+            if   type == "object" then [ $x | to_entries[] | .value | depth ] | if length == 0 then 1 else max + 1 end
+            elif type == "array"  then [ $x[] | depth ] | if length == 0 then 1 else max + 1 end
+            else 0
+            end;
+
+        def truncate_at(d; strat):
+            if d <= 0 then
+                if strat == "stringify" then tojson else null end
+            elif type == "object" then with_entries(.value = (.value | truncate_at(d-1; strat)))
+            elif type == "array"  then map(truncate_at(d-1; strat))
+            else .
+            end;
+
+        .clients |= map(
+            .extra_imperative  = (.extra_imperative  | if . != null then truncate_at($max_depth; $strategy) else . end) |
+            .extra_informative = (.extra_informative | if . != null then truncate_at($max_depth; $strategy) else . end)
+        )
+        '
+}
+
+# ---------------------------------------------------------------------------
+# step: json_schema_validation
+# Valida el inventario resultante contra un JSON Schema.
+# Requiere python3-jsonschema; si no está disponible, emite warn y continúa.
+# ---------------------------------------------------------------------------
+step_json_schema_validation() {
+    local inventory="$1"
+    local config="$2"
+
+    local schema_path ; schema_path="$(echo "$config" | jq -r '.schema    // empty')"
+    local step_fail   ; step_fail="$(  echo "$config" | jq -r '.fail_mode // "passthrough"')"
+
+    if [[ -z "$schema_path" || ! -f "$schema_path" ]]; then
+        log_warn "[json_schema_validation] Schema no encontrado: '${schema_path}'. Paso omitido."
+        echo "$inventory"
+        return
+    fi
+
+    if ! command -v python3 > /dev/null 2>&1 || ! python3 -c "import jsonschema" 2>/dev/null; then
+        log_warn "[json_schema_validation] python3-jsonschema no disponible. Paso omitido."
+        echo "$inventory"
+        return
+    fi
+
+    local result
+    result="$(python3 - <<EOF
+import json, sys, jsonschema
+
+inventory = json.loads("""$(echo "$inventory" | sed 's/"""/\\"""/g')""")
+schema    = json.load(open("$schema_path"))
+
+valid_clients = []
+for client in inventory.get("clients", []):
+    try:
+        jsonschema.validate(instance=client, schema=schema)
+        valid_clients.append(client)
+    except jsonschema.ValidationError:
+        pass  # drop: no incluir clientes que no pasen validación
+
+inventory["clients"] = valid_clients
+print(json.dumps(inventory, separators=(',', ':')))
+EOF
+    )" || {
+        log_warn "[json_schema_validation] Error ejecutando validación."
+        if [[ "$step_fail" == "abort" ]]; then apply_fail_mode "abort" "json_schema_validation falló."; fi
+        echo "$inventory"
+        return
+    }
+
+    echo "$result"
+}
+
+# ---------------------------------------------------------------------------
+# step: jq_arbitrary
+# Filtro jq libre. Escape hatch para lo que no cabe en pasos estructurados.
+# ---------------------------------------------------------------------------
+step_jq_arbitrary() {
+    local inventory="$1"
+    local config="$2"
+
+    local filter      ; filter="$(      echo "$config" | jq -r '.filter      // empty')"
+    local filter_file ; filter_file="$( echo "$config" | jq -r '.filter_file // empty')"
+
+    if [[ -z "$filter" && -n "$filter_file" ]]; then
+        if [[ -f "$filter_file" ]]; then
+            filter="$(cat "$filter_file")"
+        else
+            log_warn "[jq_arbitrary] filter_file no encontrado: '$filter_file'. Paso omitido."
+            echo "$inventory"
+            return
+        fi
+    fi
+
+    if [[ -z "$filter" ]]; then
+        log_warn "[jq_arbitrary] ni 'filter' ni 'filter_file' definidos. Paso omitido."
+        echo "$inventory"
+        return
+    fi
+
+    log_debug "[jq_arbitrary] filter: $filter"
+
+    local result
+    if ! result="$(echo "$inventory" | jq -c "$filter" 2>/dev/null)"; then
+        log_warn "[jq_arbitrary] Error ejecutando filtro jq. Paso omitido."
+        echo "$inventory"
+        return
+    fi
+
+    echo "$result"
+}
+
+# ===========================================================================
+# EJECUCIÓN DEL PIPELINE
+# ===========================================================================
+
+PIPELINE="$(echo "$PRESET_DATA" | jq -c '.pipeline // []' 2>/dev/null || echo '[]')"
+STEP_COUNT="$(echo "$PIPELINE" | jq 'length')"
+
+log_debug "Pipeline: $STEP_COUNT paso(s)"
+
+CURRENT="$INVENTORY"
+
+for (( idx=0; idx<STEP_COUNT; idx++ )); do
+    STEP="$(    echo "$PIPELINE" | jq -c ".[$idx]")"
+    STEP_NAME="$(echo "$STEP"    | jq -r '.step')"
+    STEP_CFG="$( echo "$STEP"    | jq -c '.config // {}')"
+
+    log_debug "Paso $((idx+1))/$STEP_COUNT: $STEP_NAME"
+
+    NEXT=""
+    case "$STEP_NAME" in
+        select_clients)        NEXT="$(step_select_clients        "$CURRENT" "$STEP_CFG")" ;;
+        filter_keys)           NEXT="$(step_filter_keys           "$CURRENT" "$STEP_CFG")" ;;
+        transform)             NEXT="$(step_transform             "$CURRENT" "$STEP_CFG")" ;;
+        truncate_lists)        NEXT="$(step_truncate_lists        "$CURRENT" "$STEP_CFG")" ;;
+        anonymize)             NEXT="$(step_anonymize             "$CURRENT" "$STEP_CFG")" ;;
+        limit_depth)           NEXT="$(step_limit_depth           "$CURRENT" "$STEP_CFG")" ;;
+        json_schema_validation) NEXT="$(step_json_schema_validation "$CURRENT" "$STEP_CFG")" ;;
+        jq_arbitrary)          NEXT="$(step_jq_arbitrary          "$CURRENT" "$STEP_CFG")" ;;
+        *)
+            log_warn "Paso desconocido: '$STEP_NAME'. Omitido."
+            NEXT="$CURRENT"
+            ;;
+    esac
+
+    # Validar que el paso produjo JSON válido con schema {"clients": [...]}
+    if ! echo "$NEXT" | jq -e '.clients | arrays' > /dev/null 2>&1; then
+        apply_fail_mode "$FAIL_MODE" \
+            "Paso '$STEP_NAME' produjo JSON inválido o sin schema VA*."
+    fi
+
+    CURRENT="$NEXT"
+done
+
+# ---------------------------------------------------------------------------
+# Guardia de metadata: último recurso para garantizar payload mínimo VA*
+# ---------------------------------------------------------------------------
+RESULT="$(enforce_metadata "$CURRENT" "$INVENTORY")"
+
+log_debug "Pipeline completado. $(echo "$RESULT" | jq '.clients | length') cliente(s) en resultado."
+
+echo "$RESULT"

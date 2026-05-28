@@ -1,3 +1,20 @@
+vx-dga-l-vat (0.1-2) unstable; urgency=low
+
+  * vat-operate: parser completo implementado.
+    - Conversion YAML→JSON via yq; pipeline de pasos encadenados stdin→stdout.
+    - Guardia de metadata VA*: hostname/ip/mac/status/last_seen/extra_*
+      garantizados en cada cliente del resultado tras el pipeline completo.
+    - Pasos implementados: select_clients, filter_keys, transform,
+      truncate_lists, anonymize (hash sha256 + redact), limit_depth,
+      json_schema_validation (requiere python3-jsonschema, opcional),
+      jq_arbitrary (escape hatch con filter o filter_file).
+    - fail_mode por paso y global: passthrough (defecto) | abort | drop.
+    - Precedencia de presets: /etc/vat/presets.d/ > /usr/share/vat/presets/.
+    - Matching por source_component y direction antes de ejecutar el pipeline.
+  * debian/control: añadido yq a Depends.
+
+ -- Gabriel Navia <correos@gabrielnav.es>  Wed, 28 May 2026 19:00:00 +0200
+
 vx-dga-l-vat (0.1-1) unstable; urgency=low
 
   * Initial release.
