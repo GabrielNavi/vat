@@ -103,17 +103,26 @@ if ! echo "$INVENTORY" | jq -e '.clients | arrays' > /dev/null 2>&1; then
 fi
 
 # ---------------------------------------------------------------------------
-# Localizar fichero de preset (local > sistema)
+# Localizar fichero de preset
+# Precedencia: /etc/vat/presets.d/ > /usr/share/vat/presets/
+# Un preset puede vivir en cualquier fichero .yaml del directorio; el nombre
+# del fichero no tiene que coincidir con el nombre del preset.
 # ---------------------------------------------------------------------------
 PRESET_FILE=""
-if   [[ -f "${PRESETS_LOCAL_DIR}/${PRESET}.yaml"  ]]; then
-    PRESET_FILE="${PRESETS_LOCAL_DIR}/${PRESET}.yaml"
-elif [[ -f "${PRESETS_SYSTEM_DIR}/${PRESET}.yaml" ]]; then
-    PRESET_FILE="${PRESETS_SYSTEM_DIR}/${PRESET}.yaml"
-fi
+for _search_dir in "$PRESETS_LOCAL_DIR" "$PRESETS_SYSTEM_DIR"; do
+    [[ -d "$_search_dir" ]] || continue
+    for _f in "$_search_dir"/*.yaml; do
+        [[ -f "$_f" ]] || continue
+        if yq -o json '.' "$_f" 2>/dev/null \
+           | jq -e --arg n "$PRESET" '.presets[$n] // empty' > /dev/null 2>&1; then
+            PRESET_FILE="$_f"
+            break 2
+        fi
+    done
+done
 
 if [[ -z "$PRESET_FILE" ]]; then
-    log_warn "Preset '${PRESET}' no encontrado. Passthrough."
+    log_warn "Preset '${PRESET}' no encontrado en ${PRESETS_LOCAL_DIR}/ ni en ${PRESETS_SYSTEM_DIR}/. Passthrough."
     echo "$INVENTORY"
     exit 0
 fi
@@ -121,8 +130,13 @@ fi
 log "Preset: $PRESET_FILE"
 
 # ---------------------------------------------------------------------------
-# Convertir YAML → JSON con yq
+# Convertir YAML → JSON con yq (requiere mikefarah/yq v4+; -o json no existe en kislyuk/yq)
 # ---------------------------------------------------------------------------
+if ! yq --version 2>/dev/null | grep -q 'version v\?[4-9]'; then
+    log_warn "yq v4+ requerido (mikefarah/yq). Versión instalada: $(yq --version 2>/dev/null || echo 'no encontrado'). Passthrough."
+    echo "$INVENTORY"
+    exit 0
+fi
 if ! PRESET_JSON="$(yq -o json '.' "$PRESET_FILE" 2>/dev/null)"; then
     log_error "Error parseando YAML: $PRESET_FILE"
     echo "$INVENTORY"
@@ -328,7 +342,7 @@ step_transform() {
 
     local imp_rules ; imp_rules="$( echo "$config" | jq -c '.imperative  // []')"
     local inf_rules ; inf_rules="$( echo "$config" | jq -c '.informative // []')"
-    local drop      ; drop="$(      echo "$config" | jq -r '.defaults[0].drop // false' 2>/dev/null || echo "false")"
+    local drop      ; drop="$(      echo "$config" | jq -r '(.defaults[0].drop // .defaults.drop) // false' 2>/dev/null || echo "false")"
 
     log_debug "[transform] imp_rules=$imp_rules inf_rules=$inf_rules drop=$drop"
 
@@ -417,6 +431,13 @@ step_anonymize() {
 
     local mode          ; mode="$(          echo "$config" | jq -r '.mode           // "hash"')"
     local algo          ; algo="$(          echo "$config" | jq -r '.hash_algo      // "sha256"')"
+
+    # Verificar sha256sum disponible cuando se necesita (coreutils)
+    if [[ "$mode" == "hash" ]] && ! command -v sha256sum &>/dev/null; then
+        log_error "[anonymize] sha256sum no disponible (¿coreutils instalado?). Paso omitido."
+        echo "$inventory"
+        return
+    fi
     local deterministic ; deterministic="$( echo "$config" | jq -r '.deterministic  // true')"
     local redact_token  ; redact_token="$(  echo "$config" | jq -r '.redact_token   // "***"')"
     local fields        ; fields="$(        echo "$config" | jq -r '.fields[]       // empty' 2>/dev/null || true)"
@@ -551,25 +572,22 @@ step_json_schema_validation() {
         return
     fi
 
+    # JSON pasado por stdin de Python — nunca interpolado en código.
     local result
-    result="$(python3 - <<EOF
-import json, sys, jsonschema
-
-inventory = json.loads("""$(echo "$inventory" | sed 's/"""/\\"""/g')""")
-schema    = json.load(open("$schema_path"))
-
-valid_clients = []
-for client in inventory.get("clients", []):
+    result="$(echo "$inventory" | SCHEMA_PATH="$schema_path" python3 -c "
+import json, sys, os, jsonschema
+inventory  = json.load(sys.stdin)
+schema     = json.load(open(os.environ['SCHEMA_PATH']))
+valid      = []
+for client in inventory.get('clients', []):
     try:
         jsonschema.validate(instance=client, schema=schema)
-        valid_clients.append(client)
+        valid.append(client)
     except jsonschema.ValidationError:
-        pass  # drop: no incluir clientes que no pasen validación
-
-inventory["clients"] = valid_clients
+        pass
+inventory['clients'] = valid
 print(json.dumps(inventory, separators=(',', ':')))
-EOF
-    )" || {
+" 2>/dev/null)" || {
         log_warn "[json_schema_validation] Error ejecutando validación."
         if [[ "$step_fail" == "abort" ]]; then apply_fail_mode "abort" "json_schema_validation falló."; fi
         echo "$inventory"

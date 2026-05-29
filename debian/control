@@ -7,7 +7,7 @@ Build-Depends: debhelper-compat (= 13)
 
 Package: vx-dga-l-vat
 Architecture: all
-Depends: bash, jq, yq
+Depends: bash, jq, yq, coreutils
 Recommends: vx-dga-l-val | vx-dga-l-vaf
 Description: Versatile Autoregistration Transformer (VAT)
  Transformador de inventarios JSON del ecosistema VA*. Lee un inventario

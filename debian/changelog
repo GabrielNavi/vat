@@ -1,3 +1,28 @@
+vx-dga-l-vat (0.3-3) unstable; urgency=low
+
+  * vat-operate: localización de preset por escaneo de todos los ficheros
+    .yaml en presets.d/ y presets/ en lugar de asumir nombre_preset=nombre_fichero.
+    Un preset puede estar en cualquier fichero del directorio; la precedencia
+    local > sistema se mantiene.
+
+ -- Gabriel Navia <correos@gabrielnav.es>  Thu, 29 May 2026 11:00:00 +0200
+
+vx-dga-l-vat (0.3-2) unstable; urgency=low
+
+  * step_json_schema_validation: corregida inyección de código — el JSON
+    se pasa por stdin de Python (json.load(sys.stdin)) en lugar de
+    interpolarse en el heredoc. Elimina un vector de ejecución de código
+    arbitrario si el inventario contiene valores con triple comilla.
+  * step_anonymize: verificación de sha256sum al inicio del paso con
+    mensaje de error descriptivo si no está disponible.
+  * step_transform: extracción de 'drop' acepta tanto array como objeto
+    en el campo 'defaults' del preset (.defaults[0].drop // .defaults.drop).
+  * Verificación de versión de yq al cargar preset: requiere mikefarah/yq
+    v4+ (-o json); emite [VAT-WARN] y passthrough si se detecta otra versión.
+  * debian/control: añadido coreutils a Depends (sha256sum).
+
+ -- Gabriel Navia <correos@gabrielnav.es>  Thu, 29 May 2026 10:00:00 +0200
+
 vx-dga-l-vat (0.3-1) unstable; urgency=low
 
   * vat-operate:
