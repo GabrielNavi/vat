@@ -1,4 +1,4 @@
-vx-dga-l-vat (0.3-3) unstable; urgency=low
+versatile-autoreg-vat (0.3-3) unstable; urgency=low
 
   * vat-operate: localización de preset por escaneo de todos los ficheros
     .yaml en presets.d/ y presets/ en lugar de asumir nombre_preset=nombre_fichero.
@@ -7,7 +7,7 @@ vx-dga-l-vat (0.3-3) unstable; urgency=low
 
  -- Gabriel Navia <correos@gabrielnav.es>  Thu, 29 May 2026 11:00:00 +0200
 
-vx-dga-l-vat (0.3-2) unstable; urgency=low
+versatile-autoreg-vat (0.3-2) unstable; urgency=low
 
   * step_json_schema_validation: corregida inyección de código — el JSON
     se pasa por stdin de Python (json.load(sys.stdin)) en lugar de
@@ -23,7 +23,7 @@ vx-dga-l-vat (0.3-2) unstable; urgency=low
 
  -- Gabriel Navia <correos@gabrielnav.es>  Thu, 29 May 2026 10:00:00 +0200
 
-vx-dga-l-vat (0.3-1) unstable; urgency=low
+versatile-autoreg-vat (0.3-1) unstable; urgency=low
 
   * vat-operate:
     - Pasos implementados: select_clients, filter_keys, transform,
@@ -37,7 +37,7 @@ vx-dga-l-vat (0.3-1) unstable; urgency=low
 
  -- Gabriel Navia <correos@gabrielnav.es>  Wed, 28 May 2026 18:00:00 +0200
 
-vx-dga-l-vat (0.2-2) unstable; urgency=low
+versatile-autoreg-vat (0.2-2) unstable; urgency=low
 
   * vat-operate: parser completo implementado.
     - Conversion YAML→JSON via yq; pipeline de pasos encadenados stdin→stdout.
@@ -46,7 +46,7 @@ vx-dga-l-vat (0.2-2) unstable; urgency=low
 
  -- Gabriel Navia <correos@gabrielnav.es>  Wed, 28 May 2026 18:00:00 +0200
  
- vx-dga-l-vat (0.2-1) unstable; urgency=low
+ versatile-autoreg-vat (0.2-1) unstable; urgency=low
 
   * Estructura de presets: /etc/vat/presets.d/ para presets del administrador,
     /usr/share/vat/presets/ para presets de referencia distribuidos con el paquete.
@@ -55,7 +55,7 @@ vx-dga-l-vat (0.2-2) unstable; urgency=low
 
  -- Gabriel Navia <correos@gabrielnav.es>  Wed, 28 May 2026 18:00:00 +0200
 
-vx-dga-l-vat (0.1-2) unstable; urgency=low
+versatile-autoreg-vat (0.1-2) unstable; urgency=low
 
   * vat-operate: stub del transformador de inventarios JSON del ecosistema VA*.
     Lee stdin ({"clients": [...]}), aplica el preset YAML indicado y escribe
@@ -64,7 +64,7 @@ vx-dga-l-vat (0.1-2) unstable; urgency=low
 
  -- Gabriel Navia <correos@gabrielnav.es>  Wed, 28 May 2026 19:00:00 +0200
 
-vx-dga-l-vat (0.1-1) unstable; urgency=low
+versatile-autoreg-vat (0.1-1) unstable; urgency=low
 
   * Initial release.
 

@@ -1,4 +1,4 @@
-# vx-dga-l-vat — Versatile Autoregistration Transformer
+# versatile-autoreg-vat — Versatile Autoregistration Transformer
 
 Transformador de inventarios JSON del ecosistema VA*. Opera como filtro Unix estándar: lee un inventario `{"clients": [...]}` desde stdin, aplica un pipeline de transformaciones definido en un preset YAML y escribe el resultado en stdout.
 
@@ -7,17 +7,17 @@ No es un daemon. No tiene servicio systemd. Se invoca puntualmente desde los buc
 ## Ecosistema
 
 ```
-vx-dga-l-vas          → servidor de registro canónico
-vx-dga-l-vac          → cliente de autoregistro
-vx-dga-l-val          → consumidor genérico (hooks) ← usa VAT antes del dispatch
-vx-dga-l-vaf          → federación de VAS en jerarquía ← usa VAT antes de upstream
-vx-dga-l-vat          → transformador de inventarios (este paquete)
+versatile-autoreg-vas          → servidor de registro canónico
+versatile-autoreg-vac          → cliente de autoregistro
+versatile-autoreg-val          → consumidor genérico (hooks) ← usa VAT antes del dispatch
+versatile-autoreg-vaf          → federación de VAS en jerarquía ← usa VAT antes de upstream
+versatile-autoreg-vat          → transformador de inventarios (este paquete)
 ```
 
 ## Instalación
 
 ```bash
-dpkg -i vx-dga-l-vat_0.1-1_all.deb
+dpkg -i versatile-autoreg-vat_0.1-1_all.deb
 ```
 
 No requiere configuración para operar. Los presets se colocan en `/etc/vat/presets.d/`.
@@ -188,12 +188,12 @@ register_client "$LOC_HOST" "$LOC_IP" "$LOC_MAC" "$NEW_IMP" ""
 
 ## Información del paquete
 
-- Nombre: `vx-dga-l-vat`
+- Nombre: `versatile-autoreg-vat`
 - Versión: 0.1-1
 - Arquitectura: all
 - Mantenedor: Gabriel Navia \<correos@gabrielnav.es\>
 - Licencia: Apache 2.0
-- Repositorio: https://gitlab.vitalinux.educa.aragon.es/gabriel/vx-dga-l-vat
+- Repositorio: https://gitlab.vitalinux.educa.aragon.es/gabriel/versatile-autoreg-vat
 
 ## Construcción del paquete
 

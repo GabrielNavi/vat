@@ -1,14 +1,14 @@
-Source: vx-dga-l-vat
+Source: versatile-autoreg-vat
 Section: admin
 Priority: optional
 Maintainer: Gabriel Navia <correos@gabrielnav.es>
 Standards-Version: 4.7.0
 Build-Depends: debhelper-compat (= 13)
 
-Package: vx-dga-l-vat
+Package: versatile-autoreg-vat
 Architecture: all
 Depends: bash, jq, yq, coreutils
-Recommends: vx-dga-l-val | vx-dga-l-vaf
+Recommends: versatile-autoreg-val | versatile-autoreg-vaf
 Description: Versatile Autoregistration Transformer (VAT)
  Transformador de inventarios JSON del ecosistema VA*. Lee un inventario
  {"clients": [...]} desde stdin, aplica un preset de transformacion YAML
