@@ -342,7 +342,7 @@ step_transform() {
 
     local imp_rules ; imp_rules="$( echo "$config" | jq -c '.imperative  // []')"
     local inf_rules ; inf_rules="$( echo "$config" | jq -c '.informative // []')"
-    local drop      ; drop="$(      echo "$config" | jq -r '(.defaults[0].drop // .defaults.drop) // false' 2>/dev/null || echo "false")"
+    local drop      ; drop="$(      echo "$config" | jq -r '.defaults.drop // false' 2>/dev/null || echo "false")"
 
     log_debug "[transform] imp_rules=$imp_rules inf_rules=$inf_rules drop=$drop"
 
@@ -356,14 +356,11 @@ step_transform() {
             else
                 # Construir mapa from→to para lookup rápido
                 (rules | map({(.from): .to}) | add // {}) as $rmap |
-                # Claves con regla explícita
-                (rules | map(.from) | unique) as $from_keys |
-
                 with_entries(
                     if .key as $k | $rmap | has($k) then
                         .key = $rmap[.key]       # renombrar
                     elif drop then
-                        empty                    # eliminar si drop=true y no tiene regla
+                        empty                    # eliminar si drop=true y sin regla
                     else
                         .                        # conservar sin cambios
                     end
@@ -406,8 +403,7 @@ step_truncate_lists() {
                 reduce rules[] as $rule (
                     .;
                     if .[$rule.path] | type == "array" then
-                        .[$rule.path] = .[$rule.path][:.[$rule.path | length] | if . > $rule.max_items then $rule.max_items else . end]
-                        | .[$rule.path] = .[$rule.path][:$rule.max_items]
+                        .[$rule.path] = .[$rule.path][:$rule.max_items]
                     else . end
                 )
             end;
@@ -470,40 +466,59 @@ step_anonymize() {
                     )')"
             fi
         else
-            # mode=hash: extraer cada valor, hashear, reinsertar
-            local client_count
-            client_count="$(echo "$result" | jq '.clients | length')"
+            # mode=hash: extraer todos los valores a hashear en una sola
+            # llamada jq, hashear en bash, reinsertar en una sola llamada jq.
+            local vals_json hashes_json
+            if [[ -z "$sub" ]]; then
+                vals_json="$(echo "$result" | jq -c \
+                    --arg f "$top" \
+                    '[.clients[] | .[$f] // null | if . != null then tostring else null end]')"
+            else
+                vals_json="$(echo "$result" | jq -c \
+                    --arg top "$top" --arg sub "$sub" \
+                    '[.clients[] | .[$top] | if type == "object" then .[$sub] else null end | if . != null then tostring else null end]')"
+            fi
 
-            for (( i=0; i<client_count; i++ )); do
-                local val
-                if [[ -z "$sub" ]]; then
-                    val="$(echo "$result" | jq -r --arg f "$top" --argjson i "$i" '.clients[$i][$f] // empty')"
+            # Hashear cada valor en bash (null → null)
+            local idx=0
+            hashes_json="["
+            while IFS= read -r val; do
+                [[ $idx -gt 0 ]] && hashes_json+=","
+                if [[ "$val" == "null" ]]; then
+                    hashes_json+="null"
                 else
-                    val="$(echo "$result" | jq -r --arg top "$top" --arg sub "$sub" --argjson i "$i" \
-                        '.clients[$i][$top][$sub] // empty' 2>/dev/null || true)"
+                    local hashed
+                    if [[ "$deterministic" == "true" ]]; then
+                        hashed="$(printf '%s' "$val" | sha256sum | awk '{print $1}')"
+                    else
+                        local salt
+                        salt="$(head -c 8 /dev/urandom | xxd -p)"
+                        hashed="$(printf '%s%s' "$val" "$salt" | sha256sum | awk '{print $1}')"
+                    fi
+                    hashes_json+="\"$hashed\""
                 fi
+                (( idx++ )) || true
+            done < <(echo "$vals_json" | jq -r '.[]')
+            hashes_json+="]"
 
-                [[ -z "$val" ]] && continue
-
-                local hashed
-                if [[ "$deterministic" == "true" ]]; then
-                    hashed="$(printf '%s' "$val" | sha256sum | awk '{print $1}')"
-                else
-                    local salt
-                    salt="$(head -c 8 /dev/urandom | xxd -p)"
-                    hashed="$(printf '%s%s' "$val" "$salt" | sha256sum | awk '{print $1}')"
-                fi
-
-                if [[ -z "$sub" ]]; then
-                    result="$(echo "$result" | jq -c \
-                        --argjson i "$i" --arg f "$top" --arg h "$hashed" \
-                        '.clients[$i][$f] = $h')"
-                else
-                    result="$(echo "$result" | jq -c \
-                        --argjson i "$i" --arg top "$top" --arg sub "$sub" --arg h "$hashed" \
-                        '.clients[$i][$top][$sub] = $h')"
-                fi
-            done
+            # Reinsertar en una sola llamada jq
+            if [[ -z "$sub" ]]; then
+                result="$(echo "$result" | jq -c \
+                    --arg f "$top" --argjson hashes "$hashes_json" \
+                    '.clients = [.clients | to_entries[] |
+                        .value as $c | .key as $i |
+                        if ($hashes[$i] != null) then ($c | .[$f] = $hashes[$i]) else $c end
+                    ]')"
+            else
+                result="$(echo "$result" | jq -c \
+                    --arg top "$top" --arg sub "$sub" --argjson hashes "$hashes_json" \
+                    '.clients = [.clients | to_entries[] |
+                        .value as $c | .key as $i |
+                        if ($hashes[$i] != null and ($c[$top] | type) == "object")
+                        then ($c | .[$top][$sub] = $hashes[$i])
+                        else $c end
+                    ]')"
+            fi
         fi
     done <<< "$fields"
 
@@ -518,21 +533,17 @@ step_limit_depth() {
     local inventory="$1"
     local config="$2"
 
-    local max_depth ; max_depth="$(echo "$config" | jq -r '.max_depth  // 3')"
-    local strategy  ; strategy="$( echo "$config" | jq -r '.strategy   // "stringify"')"
+    local max_depth   ; max_depth="$(  echo "$config" | jq -r '.max_depth     // 3')"
+    local strategy    ; strategy="$(   echo "$config" | jq -r '.strategy      // "stringify"')"
+    local paths_exempt; paths_exempt="$(echo "$config" | jq -c '.paths_exempt // []')"
 
-    log_debug "[limit_depth] max_depth=$max_depth strategy=$strategy"
+    log_debug "[limit_depth] max_depth=$max_depth strategy=$strategy paths_exempt=$paths_exempt"
 
     echo "$inventory" | jq -c \
-        --argjson max_depth "$max_depth" \
-        --arg     strategy  "$strategy"  \
+        --argjson max_depth    "$max_depth"    \
+        --arg     strategy     "$strategy"     \
+        --argjson paths_exempt "$paths_exempt" \
         '
-        def depth: . as $x |
-            if   type == "object" then [ $x | to_entries[] | .value | depth ] | if length == 0 then 1 else max + 1 end
-            elif type == "array"  then [ $x[] | depth ] | if length == 0 then 1 else max + 1 end
-            else 0
-            end;
-
         def truncate_at(d; strat):
             if d <= 0 then
                 if strat == "stringify" then tojson else null end
@@ -541,9 +552,26 @@ step_limit_depth() {
             else .
             end;
 
+        # Convierte "a.b.c" en ["a","b","c"] para getpath/setpath
+        def dotpath: split(".");
+
+        def apply_with_exempt(extra; strat; d; exempt):
+            if extra == null then null
+            else
+                # Guardar valores de rutas exentas antes de truncar
+                (exempt | map({path: dotpath, val: (. as $p | extra | try getpath($p | split(".")) catch null)}) ) as $saved |
+                # Aplicar truncado
+                (extra | truncate_at(d; strat)) as $truncated |
+                # Restaurar rutas exentas que existían
+                reduce $saved[] as $s (
+                    $truncated;
+                    if $s.val != null then setpath($s.path; $s.val) else . end
+                )
+            end;
+
         .clients |= map(
-            .extra_imperative  = (.extra_imperative  | if . != null then truncate_at($max_depth; $strategy) else . end) |
-            .extra_informative = (.extra_informative | if . != null then truncate_at($max_depth; $strategy) else . end)
+            .extra_imperative  = apply_with_exempt(.extra_imperative;  $strategy; $max_depth; $paths_exempt) |
+            .extra_informative = apply_with_exempt(.extra_informative; $strategy; $max_depth; $paths_exempt)
         )
         '
 }
@@ -626,12 +654,15 @@ step_jq_arbitrary() {
 
     log_debug "[jq_arbitrary] filter: $filter"
 
-    local result
-    if ! result="$(echo "$inventory" | jq -c "$filter" 2>/dev/null)"; then
-        log_warn "[jq_arbitrary] Error ejecutando filtro jq. Paso omitido."
+    local result jq_err
+    if ! result="$(echo "$inventory" | jq -c "$filter" 2>/tmp/vat_jq_err.$$)"; then
+        jq_err="$(cat /tmp/vat_jq_err.$$ 2>/dev/null | head -1)"
+        rm -f /tmp/vat_jq_err.$$
+        log_warn "[jq_arbitrary] Error ejecutando filtro jq: ${jq_err:-desconocido}. Paso omitido."
         echo "$inventory"
         return
     fi
+    rm -f /tmp/vat_jq_err.$$
 
     echo "$result"
 }

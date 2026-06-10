@@ -1,3 +1,26 @@
+versatile-autoreg-vat (0.3-4) unstable; urgency=low
+
+  * step_truncate_lists: corregida expresión jq inválida en apply_path_rules
+    que causaba que el truncado por path no se aplicara nunca (la primera línea
+    del reduce usaba .[$rule.path | length] en vez de [:$rule.max_items]).
+  * step_limit_depth: implementado paths_exempt — rutas listadas se preservan
+    a profundidad completa aunque superen max_depth. Ver example.yaml.
+  * step_anonymize: modo hash reescrito de O(n×m) subprocesos jq a 2 llamadas
+    jq totales (una lectura de todos los valores, una escritura de todos los
+    hashes), más sha256sum por valor. Evita fork-storm con inventarios grandes.
+  * step_jq_arbitrary: errores de jq ya no se silencian con 2>/dev/null; se
+    captura la primera línea del error y se emite como [VAT-WARN].
+  * step_transform: simplificada extracción de defaults.drop (solo objeto,
+    eliminado soporte del array legacy). Eliminada variable $from_keys que se
+    computaba pero nunca se usaba (dead code).
+  * example.yaml: transform.defaults actualizado de array a objeto
+    ({drop: true}), coherente con lo que el código ahora espera.
+  * debian/control: eliminado bash de Depends (paquete esencial).
+  * debian/man/vat-operate.8: nueva man page con descripción de todos los
+    pasos del pipeline, opciones CLI, fail_mode y ficheros.
+
+ -- Gabriel Navia <correos@gabrielnav.es>  Wed, 10 Jun 2026 12:00:00 +0200
+
 versatile-autoreg-vat (0.3-3) unstable; urgency=low
 
   * vat-operate: localización de preset por escaneo de todos los ficheros
@@ -45,8 +68,8 @@ versatile-autoreg-vat (0.2-2) unstable; urgency=low
       garantizados en cada cliente del resultado tras el pipeline completo.
 
  -- Gabriel Navia <correos@gabrielnav.es>  Wed, 28 May 2026 18:00:00 +0200
- 
- versatile-autoreg-vat (0.2-1) unstable; urgency=low
+
+versatile-autoreg-vat (0.2-1) unstable; urgency=low
 
   * Estructura de presets: /etc/vat/presets.d/ para presets del administrador,
     /usr/share/vat/presets/ para presets de referencia distribuidos con el paquete.

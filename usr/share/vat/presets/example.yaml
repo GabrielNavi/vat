@@ -103,8 +103,7 @@ presets:
             - from: "impresoras_cups"
               to:   "printers"
           defaults:
-            - from: "*"             # comodín: cualquier clave no listada arriba
-              drop: true            # eliminarla del resultado
+            drop: true              # eliminar cualquier clave no listada en reglas from/to
 
       # ── step: filter_keys ──────────────────────────────────────────────────
       # Controla qué campos de cada cliente se incluyen en el resultado.

@@ -1,0 +1,188 @@
+.TH VAT-OPERATE 8 "2026-06-10" "versatile-autoreg-vat" "System Administration"
+.SH NAME
+vat-operate \- VAT JSON inventory transformer
+.SH SYNOPSIS
+.B echo "$INVENTORY"
+|
+.B vat-operate
+.B \-\-preset
+.I name
+.RB [ \-\-source-component
+.IR component ]
+.RB [ \-\-direction
+.IR direction ]
+.SH DESCRIPTION
+.B vat-operate
+reads a VA* inventory JSON
+.RI ( {"clients": [...]} )
+from standard input, applies the named preset pipeline, and writes the
+transformed JSON to standard output.
+.PP
+If the preset is not found, if a pipeline step fails, or if
+.B fail_mode
+is
+.BR passthrough ,
+.B vat-operate
+outputs the original inventory unchanged and exits with code 0.
+It never blocks the calling component's cycle.
+.PP
+Preset files are YAML and are searched in order:
+.TP
+.I /etc/vat/presets.d/*.yaml
+Administrator presets (higher precedence).
+.TP
+.I /usr/share/vat/presets/*.yaml
+Package-distributed presets.
+.PP
+A preset name does not have to match the file name. Multiple presets may
+live in the same file.
+.SH OPTIONS
+.TP
+.BI \-\-preset " name"
+Name of the preset to apply. Mandatory.
+.TP
+.BI \-\-source-component " component"
+Calling component: one of
+.BR VAS ,
+.BR VAC ,
+.BR VAL ,
+.BR VAF .
+Used to match against
+.B match.source_component
+in the preset. If the preset lists components and this value is not among
+them, the preset is skipped (passthrough). Optional but recommended.
+.TP
+.BI \-\-direction " direction"
+Data direction:
+.B upstream
+(data flowing to an upper VAS),
+.B downstream
+(data flowing to hooks or local consumers), or
+.BR both .
+Matched against the preset's
+.B direction
+field. Optional but recommended.
+.TP
+.BR \-h ", " \-\-help
+Show usage summary and exit.
+.SH PIPELINE STEPS
+Steps are defined in the preset's
+.B pipeline
+list and applied in order.
+.TP
+.B select_clients
+Filter which clients pass based on
+.BR status ,
+.BR ip_prefix ,
+.B has_key
+and
+.BR limit .
+.TP
+.B filter_keys
+Control which keys inside
+.B extra_imperative
+and
+.B extra_informative
+are included (whitelist/blacklist modes).
+.TP
+.B transform
+Rename keys within the extras. With
+.BR "defaults.drop: true" ,
+unlisted keys are removed (implicit whitelist after renaming).
+.TP
+.B truncate_lists
+Limit the number of elements in arrays inside the extras. Accepts a
+global
+.B max_items_global
+for all arrays in a block, or per-path
+.B max_items
+rules.
+.TP
+.B anonymize
+Hash or redact named fields in each client. Hash mode (
+.BR mode: hash )
+runs a single
+.BR sha256sum (1)
+pass per field across all clients. Redact mode (
+.BR mode: redact )
+replaces values with a configurable token. Supports dot-notation for
+nested fields (e.g.
+.BR "extra_imperative.user" ).
+.TP
+.B limit_depth
+Limit JSON nesting depth inside the extras. Deeper nodes are either
+stringified (
+.BR strategy: stringify )
+or set to null (
+.BR strategy: truncate ).
+Paths listed in
+.B paths_exempt
+are preserved at full depth even if they exceed
+.BR max_depth .
+.TP
+.B json_schema_validation
+Validate clients against a JSON Schema (draft-07). Requires
+.BR python3-jsonschema .
+Clients failing validation are dropped from the result when
+.BR "fail_mode: drop" .
+.TP
+.B jq_arbitrary
+Apply an arbitrary
+.BR jq (1)
+filter to the full inventory. Escape hatch for cases not covered by the
+structured steps. Errors are logged with the first line of the jq error message.
+.SH FAIL MODES
+.TP
+.B passthrough
+(default) Return the original inventory on any error. The calling
+component continues normally.
+.TP
+.B abort
+Exit with code 1. The calling component handles the failure.
+.TP
+.B drop
+Return
+.B {"clients":[]}
+on error.
+.PP
+.B fail_mode
+can be set at the file level (
+.B defaults.fail_mode
+) and overridden per preset. The
+.B json_schema_validation
+step also accepts its own
+.BR fail_mode .
+.SH EXIT STATUS
+.TP
+.B 0
+Success (including passthrough).
+.TP
+.B 1
+Fatal error: invalid argument, or
+.B fail_mode=abort
+triggered.
+.SH ENVIRONMENT
+.TP
+.B VAT_LOG_LEVEL
+Overrides the preset's
+.B log_level
+setting at runtime.
+.B no
+|
+.B normal
+|
+.B debug
+.SH FILES
+.TP
+.I /etc/vat/presets.d/
+Administrator preset directory (higher precedence).
+.TP
+.I /usr/share/vat/presets/example.yaml
+Reference preset file with all steps documented.
+.SH SEE ALSO
+.BR val (8),
+.BR vaf (8),
+.BR jq (1),
+.BR yq (1)
+.SH AUTHOR
+Gabriel Navia <correos@gabrielnav.es>
