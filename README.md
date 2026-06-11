@@ -179,18 +179,21 @@ The pipeline runs strictly in order. A common layout is: select first, filter an
 # /etc/vac/vac.conf
 SYNC_CLIENTS=true
 USE_VAT=true
-VAT_PRESET=centro_downstream_detallado
+VAT_PRESET=clients_local_filtered
 ```
 
-When `USE_VAT=true`, VAC applies VAT to `clients.json` after each inventory download and before any downstream consumer reads it. The transform runs with `--source-component VAC --direction downstream`.
+VAC applies VAT in `--direction downstream` to transform `clients.json` after each inventory download, before any downstream consumer reads it.
 
 ```bash
-# Fragment of the VAC download path when USE_VAT=true
+# Fragment of the VAC download path (vac-common.sh:354-365)
 if [[ "$USE_VAT" == "true" && -n "$VAT_PRESET" ]]; then
-    CLIENTS_JSON="$(vat-operate \
-        --source-component VAC \
-        --direction downstream \
-        --preset "$VAT_PRESET" < /var/lib/vac/clients.json)"
+    if command -v vat-operate &>/dev/null; then
+        vat_out="$(vat-operate --source-component VAC --direction downstream \
+            --preset "$VAT_PRESET" < "$CLIENTS_FILE" 2>/dev/null)" \
+        && echo "$vat_out" > "${CLIENTS_FILE}.tmp" \
+        && mv "${CLIENTS_FILE}.tmp" "$CLIENTS_FILE" \
+        && log "[VAT] clients.json saneado con preset '$VAT_PRESET'"
+    fi
 fi
 ```
 
@@ -198,29 +201,42 @@ fi
 
 ## Integration in VAL
 
+VAL applies VAT at two distinct points:
+
+**Upstream (on arrival):** Normalizes clients.json when received from the upper layer (val-common.sh:196-206).
+
 ```bash
 # /etc/val/val.conf
 USE_VAT=true
-VAT_PRESET=centro_downstream_detallado
+VAT_PRESET=normalize_on_arrival
+
+# Applied with --direction upstream
+if [[ "$USE_VAT" == "true" && -n "$VAT_PRESET" ]]; then
+    vat_out="$(vat-operate --source-component VAL --direction upstream \
+        --preset "$VAT_PRESET" < "$CLIENTS_FILE" 2>/dev/null)" \
+    && echo "$vat_out" > "${CLIENTS_FILE}.tmp" && mv "${CLIENTS_FILE}.tmp" "$CLIENTS_FILE"
+fi
 ```
+
+**Downstream (on service to hooks):** Filters clients before dispatching to local hook handlers (val-common.sh:231-241).
 
 ```bash
-# Fragment of the VAL loop when USE_VAT=true
-if [[ "$USE_VAT" == "true" ]]; then
-    INVENTORY="$(echo "$INVENTORY" | vat-operate \
-        --source-component VAL \
-        --direction downstream \
-        --preset "$VAT_PRESET")"
+# Same preset variable; applied separately with --direction downstream
+if [[ "$USE_VAT" == "true" && -n "$VAT_PRESET" ]]; then
+    vat_out="$(vat-operate --source-component VAL --direction downstream \
+        --preset "$VAT_PRESET" < "${key}_clients.json" 2>/dev/null)" \
+    && echo "$vat_out" > "${out}.tmp" && mv "${out}.tmp" "$out"
 fi
-
 echo "$INVENTORY" | "$HOOK"
 ```
-
-VAT runs before hooks are dispatched, so the hooks receive the transformed inventory.
 
 ---
 
 ## Integration in VAF
+
+VAF applies VAT in both directions:
+
+**Upstream:** Normalize or reduce the local inventory before registering in the upper VAS (vaf:202-206).
 
 ```bash
 # /etc/vaf/vaf.conf
@@ -229,18 +245,31 @@ VAT_PRESET=aula_upstream_minimal
 ```
 
 ```bash
-# Fragment of the VAF loop when USE_VAT=true
-if [[ "$USE_VAT" == "true" ]]; then
+# Fragment of the VAF registration loop (upstream)
+if [[ "$USE_VAT" == "true" && -n "$VAT_PRESET" ]] && command -v vat-operate &>/dev/null; then
     NEW_IMP="$(echo "$NEW_IMP" | vat-operate \
-        --source-component VAF \
-        --direction upstream \
-        --preset "$VAT_PRESET")"
+        --source-component VAF --direction upstream \
+        --preset "$VAT_PRESET" 2>/dev/null)"
 fi
-
 register_client "$LOC_HOST" "$LOC_IP" "$LOC_MAC" "$NEW_IMP" ""
 ```
 
-VAT runs before the payload is sent to the upper VAS, so the published extras can be normalized or reduced in place.
+**Downstream:** Filter the replicated database inventory before storing it locally (vaf-common.sh:624-630).
+
+```bash
+# /etc/vaf/vaf.conf
+USE_VAT=true
+VAT_PRESET=aula_downstream_detailed
+```
+
+```bash
+# Fragment of the VAF database replica processing (downstream)
+if [[ "$USE_VAT" == "true" && -n "$VAT_PRESET" ]] && command -v vat-operate &>/dev/null; then
+    vat_out="$(vat-operate --source-component VAF --direction downstream \
+        --preset "$VAT_PRESET" < "$TMP_UPPER_CLIENTS" 2>/dev/null)" \
+    && echo "$vat_out" > "$TMP_UPPER_CLIENTS"
+fi
+```
 
 ---
 
