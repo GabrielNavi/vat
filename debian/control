@@ -7,8 +7,9 @@ Build-Depends: debhelper-compat (= 13)
 
 Package: versatile-autoreg-vat
 Architecture: all
-Depends: jq, yq
+Depends: jq, python3-yaml
 Recommends: versatile-autoreg-val | versatile-autoreg-vaf
+Suggests: yq, python3-jsonschema
 Description: Versatile Autoregistration Transformer (VAT)
  Transformador de inventarios JSON del ecosistema VA*. Lee un inventario
  {"clients": [...]} desde stdin, aplica un preset de transformacion YAML
