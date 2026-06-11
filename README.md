@@ -1,171 +1,226 @@
-# versatile-autoreg-vat — Versatile Autoregistration Transformer
+<div align="center">
+  <img src="assets/logo.svg" alt="VAT logo" width="100"/>
+  <h1>VAT - Versatile Autoregistration Transformer</h1>
+</div>
 
-Transformador de inventarios JSON del ecosistema VA*. Opera como filtro Unix estándar: lee un inventario `{"clients": [...]}` desde stdin, aplica un pipeline de transformaciones definido en un preset YAML y escribe el resultado en stdout.
+[![en](https://img.shields.io/badge/lang-en-blue.svg)](README.md)
+[![es](https://img.shields.io/badge/lang-es-green.svg)](README.es.md)
 
-No es un daemon. No tiene servicio systemd. Se invoca puntualmente desde los bucles de VAL, VAF o cualquier componente que necesite transformar el inventario antes de entregarlo a su destino.
+[![License: Apache 2.0](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE)
+[![Debian package](https://img.shields.io/badge/package-versatile--autoreg--vat-brightgreen)](https://github.com/GabrielNavi/versatile-autoreg-vat)
+[![Bash](https://img.shields.io/badge/shell-bash-89e051.svg)](https://www.gnu.org/software/bash/)
+[![Platform: Linux](https://img.shields.io/badge/platform-Linux-lightgrey.svg)]()
 
-## Ecosistema
+VAT is the JSON inventory transformer for the VA* ecosystem. It behaves like a standard Unix filter: it reads an inventory `{"clients": [...]}` from stdin, applies a YAML preset pipeline, and writes the transformed JSON to stdout. It can rename, filter, truncate, anonymize, validate, or otherwise reshape inventory data before it reaches VAL hooks, an upper VAS, or any external consumer.
+
+> Version in Spanish: [README.es.md](README.es.md)
+
+---
+
+## Table of Contents
+
+- [Ecosystem](#ecosystem)
+- [Quick Start](#quick-start)
+- [Installed Files](#installed-files)
+- [Configuration](#configuration)
+- [Integration in VAC](#integration-in-vac)
+- [Presets](#presets)
+- [Pipeline Steps](#pipeline-steps)
+- [Fail Modes](#fail-modes)
+- [Integration in VAL](#integration-in-val)
+- [Integration in VAF](#integration-in-vaf)
+- [Package Information](#package-information)
+- [Build](#build)
+- [Reference](#reference)
+- [License](#license)
+
+---
+
+## Ecosystem
 
 ```
-versatile-autoreg-vas          → servidor de registro canónico
-versatile-autoreg-vac          → cliente de autoregistro
-versatile-autoreg-val          → consumidor genérico (hooks) ← usa VAT antes del dispatch
-versatile-autoreg-vaf          → federación de VAS en jerarquía ← usa VAT antes de upstream
-versatile-autoreg-vat          → transformador de inventarios (este paquete)
+VAC / VAF / VAL  ── JSON inventory ──►  VAT  ──►  hooks, upstream VAS, external consumers
 ```
 
-## Instalación
+| Package | Repository | Description |
+|---------|------------|-------------|
+| `versatile-autoreg-vas` | [vas](https://github.com/GabrielNavi/vas) | Inventory server |
+| `versatile-autoreg-vac` | [vac](https://github.com/GabrielNavi/vac) | Autoregistration client |
+| `versatile-autoreg-val` | [val](https://github.com/GabrielNavi/val) | Generic consumer with hooks |
+| `versatile-autoreg-vaf` | [vaf](https://github.com/GabrielNavi/vaf) | Federated VAS server |
+| `versatile-autoreg-vat` | [vat](https://github.com/GabrielNavi/vat) ← *this* | Inventory transformer |
+
+---
+
+## Quick Start
 
 ```bash
-dpkg -i versatile-autoreg-vat_0.1-1_all.deb
-```
+# Install
+sudo dpkg -i versatile-autoreg-vat_0.3-4_all.deb
+sudo apt-get -f install
 
-No requiere configuración para operar. Los presets se colocan en `/etc/vat/presets.d/`.
+# Inspect the available preset reference
+less /usr/share/vat/presets/example.yaml
 
-## Uso
-
-```bash
-# Desde línea de comandos
+# Run a preset from the command line
 echo "$INVENTORY" | vat-operate \
     --source-component VAL \
     --direction downstream \
-    --preset centro
-
-# Desde el bucle de VAL (val.conf)
-USE_VAT=true
-VAT_PRESET=centro
+    --preset centro_downstream_detallado
 ```
 
-Cuando `USE_VAT=true` está activo en el componente, el inventario pasa por `vat-operate` antes de llegar a los hooks (VAL) o antes de enviarse al VAS superior (VAF).
+> **Dependencies:** `jq`, `yq`
+> See the man page with `man vat-operate`.
 
-## Argumentos
+To activate VAT inside a component, set:
 
-| Argumento | Descripción |
-|---|---|
-| `--source-component` | Componente que invoca la transformación: `VAS` · `VAC` · `VAL` · `VAF` |
-| `--direction` | Sentido del flujo: `upstream` · `downstream` · `both` |
-| `--preset` | Nombre del preset a aplicar (sin extensión `.yaml`) |
+```bash
+USE_VAT=true
+VAT_PRESET=centro_downstream_detallado
+```
+
+---
+
+## Installed Files
+
+| Path | Description |
+|------|-------------|
+| `/usr/bin/vat-operate` | Main transformer CLI |
+| `/etc/vat/presets.d/` | Administrator preset directory |
+| `/usr/share/vat/presets/example.yaml` | Reference preset with all pipeline steps documented |
+
+**Reference documentation in the source tree:**
+
+| Path | Description |
+|------|-------------|
+| `usr/share/vat/presets/example.en.yml` | English reference copy of the preset example |
+
+---
+
+## Configuration
+
+VAT does not use a daemon configuration file. Presets are discovered from these locations, in order:
+
+1. `/etc/vat/presets.d/*.yaml` - administrator presets
+2. `/usr/share/vat/presets/*.yaml` - package-distributed presets
+
+`vat-operate` matches a preset by name inside the discovered preset set. A preset may also be guarded by `match.source_component` and `direction`.
+
+Recommended activation variables for the calling component:
+
+```bash
+USE_VAT=true
+VAT_PRESET=centro_downstream_detallado
+```
+
+---
 
 ## Presets
 
-Un preset es un fichero YAML que define un pipeline de pasos de transformación. Se identifica por nombre (`--preset centro` carga `centro.yaml`).
+A preset is a YAML document that defines one or more named pipelines. The source tree ships `example.yaml` as the canonical reference and `example.en.yml` as an English companion copy.
 
-**Precedencia de búsqueda:**
+Search precedence:
 
-1. `/etc/vat/presets.d/<nombre>.yaml` — presets del administrador (mayor precedencia)
-2. `/usr/share/vat/presets/<nombre>.yaml` — presets distribuidos con el paquete
+1. `/etc/vat/presets.d/` - administrator presets
+2. `/usr/share/vat/presets/` - package presets
 
-## Rutas instaladas
+A preset may define:
 
-| Ruta | Descripción |
-|---|---|
-| `/usr/bin/vat-operate` | Binario principal |
-| `/etc/vat/presets.d/` | Directorio de presets del administrador |
-| `/usr/share/vat/presets/example.yaml` | Preset de referencia con todos los pasos documentados |
+- `description` for logs and documentation.
+- `direction` as `upstream`, `downstream`, or `both`.
+- `enabled` as a global switch.
+- `fail_mode` at preset or step level.
+- `match.source_component` to constrain the calling component.
+- `pipeline` as the ordered list of transformations.
 
-## Estructura de un preset
+Example invocation:
 
-```yaml
-version: 1
-
-defaults:
-  fail_mode: passthrough   # passthrough | abort | drop
-  log_level: normal        # no | normal | debug
-  enabled: true
-
-presets:
-
-  mi_preset:
-    description: "Descripción del preset"
-    direction: downstream  # upstream | downstream | both
-    enabled: true
-    match:
-      source_component: [VAL]   # VAS | VAC | VAL | VAF
-    pipeline:
-      - step: select_clients    # filtrar qué clientes pasan
-        config:
-          status: active
-          limit: 100
-
-      - step: filter_keys       # filtrar qué campos de cada cliente
-        config:
-          keep_metadata: true
-          mode: whitelist       # whitelist | blacklist
-          paths:
-            imperative: ["clave_a"]
-            informative: ["clave_b"]
-
-      - step: transform         # renombrar claves en extras
-        config:
-          imperative:
-            - from: "nombre_original"
-              to:   "nombre_nuevo"
-          defaults:
-            - from: "*"
-              drop: true        # eliminar claves no listadas
-
-      - step: truncate_lists    # limitar tamaño de arrays en extras
-        config:
-          informative:
-            - path: "printers"
-              max_items: 5
-
-      - step: anonymize         # anonimizar campos sensibles
-        config:
-          mode: hash            # hash | redact
-          hash_algo: sha256
-          deterministic: true
-          fields:
-            - "hostname"
-            - "extra_imperative.user"
-
-      - step: limit_depth       # limitar profundidad de anidamiento
-        config:
-          max_depth: 3
-          strategy: stringify   # truncate | stringify
-
-      - step: json_schema_validation
-        config:
-          schema: "/usr/share/vat/schemas/clients_v1.json"
-          fail_mode: drop
-
-      - step: jq_arbitrary      # filtro jq libre (escape hatch)
-        config:
-          filter: '.clients |= map(select(.ip != null))'
+```bash
+echo "$INVENTORY" | vat-operate \
+    --source-component VAF \
+    --direction upstream \
+    --preset aula_upstream_minimal
 ```
 
-Ver `/usr/share/vat/presets/example.yaml` para la referencia completa con todos los pasos documentados.
+---
 
-## fail_mode
+## Pipeline Steps
 
-| Valor | Comportamiento ante error |
+| Step | Purpose |
+|------|---------|
+| `select_clients` | Filter which clients stay in the result set. |
+| `filter_keys` | Whitelist or blacklist keys inside `extra_imperative` and `extra_informative`. |
+| `transform` | Rename extra keys and optionally drop unmapped ones. |
+| `truncate_lists` | Limit array sizes inside extras. |
+| `anonymize` | Hash or redact selected fields in each client. |
+| `limit_depth` | Restrict JSON nesting depth, with optional stringify or truncate strategies. |
+| `json_schema_validation` | Validate clients against a JSON Schema. |
+| `jq_arbitrary` | Apply an arbitrary `jq` filter to the whole inventory. |
+
+The pipeline runs strictly in order. A common layout is: select first, filter and transform second, then truncate, anonymize, and validate at the end.
+
+---
+
+## Fail Modes
+
+| Value | Behavior on error |
 |---|---|
-| `passthrough` | Devuelve el JSON original sin modificar (recomendado en producción) |
-| `abort` | Sale con código 1; el componente decide qué hacer |
-| `drop` | Devuelve `{"clients": []}` |
+| `passthrough` | Return the original JSON unchanged. This is the default and recommended production mode. |
+| `abort` | Exit with code 1 and let the caller decide. |
+| `drop` | Return `{"clients": []}`. |
 
-## Integración en VAL
+`fail_mode` can be set globally in `defaults.fail_mode`, overridden per preset, and overridden again by `json_schema_validation` when needed.
+
+---
+
+## Integration in VAC
+
+```bash
+# /etc/vac/vac.conf
+SYNC_CLIENTS=true
+USE_VAT=true
+VAT_PRESET=centro_downstream_detallado
+```
+
+When `USE_VAT=true`, VAC applies VAT to `clients.json` after each inventory download and before any downstream consumer reads it. The transform runs with `--source-component VAC --direction downstream`.
+
+```bash
+# Fragment of the VAC download path when USE_VAT=true
+if [[ "$USE_VAT" == "true" && -n "$VAT_PRESET" ]]; then
+    CLIENTS_JSON="$(vat-operate \
+        --source-component VAC \
+        --direction downstream \
+        --preset "$VAT_PRESET" < /var/lib/vac/clients.json)"
+fi
+```
+
+---
+
+## Integration in VAL
 
 ```bash
 # /etc/val/val.conf
 USE_VAT=true
-VAT_PRESET=centro
+VAT_PRESET=centro_downstream_detallado
 ```
 
-El daemon VAL aplica automáticamente la transformación antes de despachar los hooks:
-
 ```bash
-# Fragmento del bucle de VAL (cuando USE_VAT=true)
+# Fragment of the VAL loop when USE_VAT=true
 if [[ "$USE_VAT" == "true" ]]; then
     INVENTORY="$(echo "$INVENTORY" | vat-operate \
         --source-component VAL \
         --direction downstream \
         --preset "$VAT_PRESET")"
 fi
+
 echo "$INVENTORY" | "$HOOK"
 ```
 
-## Integración en VAF
+VAT runs before hooks are dispatched, so the hooks receive the transformed inventory.
+
+---
+
+## Integration in VAF
 
 ```bash
 # /etc/vaf/vaf.conf
@@ -173,30 +228,48 @@ USE_VAT=true
 VAT_PRESET=aula_upstream_minimal
 ```
 
-VAF aplica la transformación sobre el extra antes de enviarlo al VAS superior:
-
 ```bash
-# Fragmento del bucle de VAF (cuando USE_VAT=true)
+# Fragment of the VAF loop when USE_VAT=true
 if [[ "$USE_VAT" == "true" ]]; then
     NEW_IMP="$(echo "$NEW_IMP" | vat-operate \
         --source-component VAF \
         --direction upstream \
         --preset "$VAT_PRESET")"
 fi
+
 register_client "$LOC_HOST" "$LOC_IP" "$LOC_MAC" "$NEW_IMP" ""
 ```
 
-## Información del paquete
+VAT runs before the payload is sent to the upper VAS, so the published extras can be normalized or reduced in place.
 
-- Nombre: `versatile-autoreg-vat`
-- Versión: 0.1-1
-- Arquitectura: all
-- Mantenedor: Gabriel Navia \<correos@gabrielnav.es\>
-- Licencia: Apache 2.0
-- Repositorio: https://gitlab.vitalinux.educa.aragon.es/gabriel/versatile-autoreg-vat
+---
 
-## Construcción del paquete
+## Package Information
+
+- Name: `versatile-autoreg-vat`
+- Version: `0.3-4`
+- Architecture: `all`
+- Maintainer: Gabriel Navia `<correos@gabrielnav.es>`
+- License: Apache 2.0
+- Repository: https://gitlab.vitalinux.educa.aragon.es/gabriel/versatile-autoreg-vat
+
+---
+
+## Build
 
 ```bash
 dpkg-buildpackage -us -uc -b
 ```
+
+---
+
+## Reference
+
+- `man vat-operate`
+- `/usr/share/vat/presets/example.yaml`
+
+---
+
+## License
+
+[Apache License 2.0](LICENSE)

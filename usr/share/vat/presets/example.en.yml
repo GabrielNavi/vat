@@ -1,0 +1,344 @@
+# VAT_PRESETS - Reference preset file for versatile-autoreg-vat
+#
+# Format: YAML 1.2
+# Version: 1
+# Active path:       /etc/vat/presets/<name>.yaml
+# Example path:      /usr/share/vat/presets/
+#
+# Use from any VA* component:
+#   echo "$INVENTORY" | vat-operate \
+#       --source-component VAL \
+#       --direction downstream \
+#       --preset centro
+#
+# vat-operate reads stdin (JSON {"clients": [...]})
+# and writes the transformed JSON to stdout after applying the selected preset.
+# If the preset does not exist or fails, behavior depends on fail_mode.
+#
+# Enable from the component (vac.conf / val.conf / vaf.conf):
+#   USE_VAT=true
+#   VAT_PRESET=centro
+# ─────────────────────────────────────────────────────────────────────────────
+
+version: 1
+
+# ─── Default values ────────────────────────────────────────────────────────
+# These apply to all presets unless a preset overrides them with its own key.
+defaults:
+
+  # fail_mode: what to do when vat-operate hits a pipeline error.
+  #   passthrough -> return the original JSON unchanged (recommended in
+  #                  production: never block the daemon cycle).
+  #   abort       -> exit with code 1; the caller decides what to do.
+  #   drop        -> return {"clients": []} (empty list).
+  fail_mode: passthrough
+
+  # log_level: vat-operate verbosity.
+  #   no      -> completely silent.
+  #   normal  -> errors and applied transformations.
+  #   debug   -> step-by-step pipeline output, useful while developing presets.
+  log_level: normal
+
+  # enabled: global switch. false disables every preset without deleting it.
+  enabled: true
+
+
+# ─── Presets ───────────────────────────────────────────────────────────────
+# Each preset has a unique name (YAML map key) and defines:
+#   description -> free text for documentation and logs.
+#   direction    -> upstream | downstream | both
+#                  upstream:   data flowing up (VAF -> UPPER_VAS).
+#                  downstream: data flowing down (VAL -> hooks, VAC -> clients.json).
+#                  both:       applies in both directions.
+#   enabled      -> true/false; overrides the global default.
+#   fail_mode    -> overrides the global default for this preset.
+#   match        -> criteria to select this preset based on invocation context
+#                  (--source-component and --direction).
+#   pipeline     -> ordered list of transformation steps.
+#                  The steps are applied in order; the output of each one
+#                  becomes the input of the next.
+presets:
+
+  # ── Preset 1: aula_upstream_minimal ───────────────────────────────────────
+  # Use case: a classroom VAF node sending inventory to the central VAS.
+  # Goal: reduce volume and rename keys before uploading, keeping only the
+  # fields that matter at the upper level.
+  aula_upstream_minimal:
+    description: "Classroom inventory toward the central/upper VAS: renaming and field reduction"
+    direction: upstream
+    enabled: true
+    fail_mode: passthrough  # never block the VAF cycle
+
+    match:
+      # source_component: list of components from which this preset may be
+      # invoked. Valid values in the current ecosystem:
+      #   VAS -> registration server (serves GET /clients)
+      #   VAC -> client (operates on its local clients.json)
+      #   VAL -> listener/consumer (operates before dispatching hooks)
+      #   VAF -> federated node (operates on the extra before sending it upstream)
+      # Note: VCD and VAR are historical aliases of VAL; do not use them in
+      # new presets.
+      source_component: [VAC, VAS, VAF]
+
+    pipeline:
+
+      # ── step: transform ───────────────────────────────────────────────────
+      # Rename keys inside extra_imperative and extra_informative.
+      # The step applies to the extra fields of EACH client in the array,
+      # not to the root inventory object.
+      #
+      # defaults.drop semantics:
+      #   Any extra_imperative/informative key that does not appear in an
+      #   explicit from/to rule is removed from the result.
+      #   This acts as an implicit whitelist after renaming.
+      #   If defaults.drop is false (or absent), non-listed keys are kept
+      #   unchanged.
+      - step: transform
+        config:
+          imperative:
+            - from: "aula1"         # original key in extra_imperative
+              to:   "A1"            # key in the resulting JSON
+            # add more rules as needed for the keys used by each VAC producer
+          informative:
+            - from: "impresoras_cups"
+              to:   "printers"
+          defaults:
+            drop: true              # remove any key not listed in from/to rules
+
+      # ── step: filter_keys ─────────────────────────────────────────────────
+      # Control which fields of each client are included in the result.
+      #
+      # keep_metadata: when true, the client's identity fields are always
+      #   preserved, regardless of mode and listed paths.
+      #   Identity fields: hostname, ip, mac, status, last_seen.
+      #   IMPORTANT: the UUID (id) is NOT present in GET /clients from VAS
+      #   by design (minimal data exposure). Do not assume keep_metadata
+      #   guarantees the UUID - that field does not exist in the input JSON.
+      #
+      # mode:
+      #   whitelist -> only the listed paths are kept (+ metadata if true).
+      #   blacklist -> the listed paths are removed; everything else remains.
+      #
+      # paths: paths within extra_imperative / extra_informative.
+      #   Dot notation for nested fields: "hardware.cpu"
+      #   Prefix wildcards are not supported in v1; use jq_arbitrary if needed.
+      - step: filter_keys
+        config:
+          keep_metadata: true
+          mode: whitelist
+          paths:
+            imperative:
+              - "A1"          # key already renamed by the transform step
+            informative:
+              - "printers"
+
+      # ── step: select_clients ──────────────────────────────────────────────
+      # Filter which clients from the array are included in the result.
+      # All criteria are optional and combined with AND logic.
+      #
+      # status:    keep only clients with this VAS status.
+      #            Values: active | inactive | archived | all
+      # ip_prefix: keep only clients whose IP starts with this prefix.
+      # has_key:   keep only clients that have this key in either
+      #            extra_imperative or extra_informative.
+      # limit:     maximum number of clients in the result.
+      #            If exceeded, the first N clients are kept in JSON order
+      #            (last_seen descending order in VAS).
+      - step: select_clients
+        config:
+          status: active
+          # ip_prefix: "192.168.1."
+          # has_key: "A1"
+          limit: 100
+
+      # ── step: truncate_lists ──────────────────────────────────────────────
+      # Limit the number of elements in lists inside the extra fields.
+      # Useful when a producer can generate variable-length arrays
+      # (printers, users, etc.) and we do not want to send huge lists upstream.
+      #
+      # max_items_global (imperative or informative block): global limit for
+      #   ALL lists in the block. Truncation happens in lexical key order if
+      #   a choice must be made.
+      #
+      # path + max_items: specific limit for one list.
+      #   Excess elements are truncated from the end of the list.
+      - step: truncate_lists
+        config:
+          # imperative:
+          #   max_items_global: 200
+          informative:
+            - path: "printers"
+              max_items: 5
+
+
+  # ── Preset 2: centro_downstream_detallado ─────────────────────────────────
+  # Use case: VAL on the central server distributing inventory to hooks.
+  # Goal: keep the full detail but anonymize sensitive fields before they
+  # reach hooks that may write to external files.
+  centro_downstream_detallado:
+    description: "Central inventory toward VAL hooks: full detail with anonymization"
+    direction: downstream
+    enabled: true
+    match:
+      source_component: [VAS, VAL]
+
+    pipeline:
+
+      # ── step: anonymize ───────────────────────────────────────────────────
+      # Anonymize concrete fields of each client.
+      #
+      # mode:
+      #   hash   -> replace the value with its hash. The result is reproducible
+      #            given the same input (see deterministic).
+      #   redact -> replace the value with redact_token (e.g. "***").
+      #            Irreversible; useful when correlation is not needed.
+      #
+      # hash_algo: hash algorithm when mode=hash.
+      #   sha256 is the recommended value. md5 is only for legacy compatibility.
+      #
+      # deterministic: only relevant with mode=hash.
+      #   true  -> same input always produces the same hash (no salt).
+      #            Allows correlating records across cycles or components
+      #            without exposing the real value.
+      #            GDPR note: if the value space is small (for example,
+      #            predictable hostnames like "pc-001"..."pc-030"), the hash
+      #            can be brute-forced. Consider redact instead.
+      #   false -> a random salt is added per execution. Better for strict
+      #            privacy; it prevents correlation across cycles.
+      #
+      # fields: list of paths (dot notation) to anonymize.
+      #   Applied to each client in the array.
+      #   Missing paths are ignored silently.
+      - step: anonymize
+        config:
+          mode: hash
+          hash_algo: sha256
+          deterministic: true   # allows correlation; see GDPR note above
+          redact_token: "***"   # used only when mode: redact
+          fields:
+            - "hostname"
+            - "extra_imperative.user"
+
+
+  # ── Preset 3: regional_downstream_public ─────────────────────────────────
+  # Use case: VAL at a regional level serving external consumers
+  # (dashboards, third-party APIs) that must not receive deeply nested data
+  # or unvalidated fields.
+  regional_downstream_public:
+    description: "Reduced public view from regional VAL toward external consumers"
+    direction: downstream
+    enabled: true
+    fail_mode: passthrough
+    match:
+      source_component: [VAL]
+
+    pipeline:
+
+      # ── step: limit_depth ─────────────────────────────────────────────────
+      # Limit JSON nesting depth.
+      # Useful to avoid federated inventories (VAF nesting sub-inventories
+      # inside extra_imperative) from exposing structures that are too deep
+      # for consumers that do not expect that level of detail.
+      #
+      # max_depth: maximum allowed depth from the client root object.
+      #   Level 1 = direct fields (hostname, ip, extra_imperative).
+      #   Level 2 = fields inside extra_imperative. And so on.
+      #
+      # strategy:
+      #   truncate   -> remove nodes deeper than max_depth.
+      #   stringify  -> serialize deeper nodes as JSON strings.
+      #                Preserves the information but makes it opaque to parsers.
+      #
+      # paths_exempt: list of paths excluded from the depth limit.
+      #   Useful to preserve deep fields that the consumer needs as-is.
+      - step: limit_depth
+        config:
+          max_depth: 3
+          strategy: stringify
+          paths_exempt:
+            - "extra_imperative.aula"
+
+      # ── step: json_schema_validation ──────────────────────────────────────
+      # Validate the resulting JSON against a JSON Schema (draft-07).
+      # Runs AFTER the transformations, so it validates the output, not the input.
+      #
+      # schema: absolute path to the .json schema file.
+      #   Recommended locations:
+      #     /usr/share/vat/schemas/  -> schemas shipped with the package.
+      #     /etc/vat/schemas/        -> administrator-local schemas.
+      #   Relative paths are NOT supported in v1 (systemd CWD is not guaranteed).
+      #
+      # fail_mode: overrides the preset-level fail_mode for this step.
+      #   drop -> if validation fails, the specific client is removed from the
+      #          array (others continue). Useful to filter malformed entries.
+      #   abort / passthrough -> apply to the full inventory.
+      - step: json_schema_validation
+        config:
+          schema: "/usr/share/vat/schemas/clients_v1.json"
+          fail_mode: drop       # clients failing the schema are dropped
+
+      # ── step: jq_arbitrary ────────────────────────────────────────────────
+      # Escape hatch: arbitrary jq filter applied to the full JSON inventory
+      # {"clients": [...]}.
+      # Use it when none of the structured steps cover the case.
+      #
+      # filter: valid jq expression. It is executed with jq -c in a subprocess.
+      #   The input is the inventory JSON in the state it reaches this step
+      #   (already transformed by the previous steps).
+      #   The output must keep the {"clients": [...]} schema.
+      #
+      # WARNING: jq_arbitrary cannot combine source_component and direction in
+      #   the filter - VAT has already routed correctly before it gets here.
+      #   The filter operates on pure data.
+      - step: jq_arbitrary
+        config:
+          filter: '.clients |= map(.extra_imperative.region = "centro-norte")'
+          # Alternative example - read the filter from an external file:
+          # filter_file: "/etc/vat/filters/add_region.jq"
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# DESIGN NOTES
+#
+# Expected input schema for vat-operate:
+#   {"clients": [
+#     {
+#       "hostname":          "equipo01.aula3",
+#       "ip":                "192.168.3.1",
+#       "mac":               "aa:bb:cc:dd:ee:01",
+#       "status":            "active",
+#       "last_seen":         "2026-05-28T10:00:00",
+#       "extra_imperative":  { ... } | null,
+#       "extra_informative": { ... } | null
+#     }
+#   ]}
+#
+# IMPORTANT: the "id" field (UUID) is NOT present. VAS does not expose it
+# in GET /clients by design (minimal data exposure). No VAT step may assume
+# that it exists.
+#
+# Step order:
+#   The steps are applied strictly in the order they appear in the pipeline.
+#   Output from each step becomes input for the next one.
+#   Recommended ordering:
+#     1. select_clients  (reduce the array first, less work for later steps)
+#     2. filter_keys     (remove fields before transforming)
+#     3. transform       (rename on the already reduced set)
+#     4. truncate_lists  (limit arrays in the filtered extras)
+#     5. anonymize       (on the final data)
+#     6. limit_depth     (as the last shape step, not a content step)
+#     7. json_schema_validation (validate the final result)
+#     8. jq_arbitrary    (last-resort adjustments)
+#
+# Multiple presets per file vs one preset per file:
+#   Both are valid. vat-operate loads every *.yaml file from /etc/vat/presets/
+#   and searches the full set by preset name.
+#   If the same name appears in two files, the one in /etc/ takes precedence
+#   over /usr/share/. Inside /etc/, the most specific one (lexically larger
+#   basename) overrides the previous entry.
+#
+# Forward compatibility:
+#   Unknown fields inside a step are ignored silently (not an error).
+#   Unknown steps emit [VAT-WARN] and are skipped (the pipeline does not abort)
+#   unless fail_mode is abort.
+# ─────────────────────────────────────────────────────────────────────────────
