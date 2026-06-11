@@ -45,7 +45,7 @@ VAC / VAF / VAL  ── inventario JSON ──►  VAT  ──►  hooks, VAS su
 | `versatile-autoreg-vas` | [vas](https://github.com/GabrielNavi/vas) | Servidor de inventario |
 | `versatile-autoreg-vac` | [vac](https://github.com/GabrielNavi/vac) | Cliente de autoregistro |
 | `versatile-autoreg-val` | [val](https://github.com/GabrielNavi/val) | Consumidor generico con hooks |
-| `versatile-autoreg-vaf` | [vaf](https://github.com/GabrielNavi/vaf) | Servidor VAS federado |
+| `versatile-autoreg-vaf` | [vaf](https://github.com/GabrielNavi/vaf) | Federación de servidores (beta) |
 | `versatile-autoreg-vat` | [vat](https://github.com/GabrielNavi/vat) ← *este* | Transformador de inventarios |
 
 ---
