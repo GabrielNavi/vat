@@ -103,6 +103,32 @@ if ! echo "$INVENTORY" | jq -e '.clients | arrays' > /dev/null 2>&1; then
 fi
 
 # ---------------------------------------------------------------------------
+# Helper: convertir YAML → JSON
+# Preferencia: python3-yaml (Depends, repo Debian oficial)
+#              → yq v4+ (Suggests, binario externo, fallback)
+#              → passthrough con warn si ninguno disponible
+# Lee desde stdin, escribe JSON en stdout.
+# ---------------------------------------------------------------------------
+yaml_to_json() {
+    if python3 -c "import yaml" 2>/dev/null; then
+        python3 -c "
+import sys, yaml, json
+try:
+    data = yaml.safe_load(sys.stdin.read())
+    print(json.dumps(data))
+except Exception as e:
+    sys.stderr.write('[VAT-ERROR] yaml_to_json: ' + str(e) + '\n')
+    sys.exit(1)
+"
+    elif command -v yq &>/dev/null && yq --version 2>/dev/null | grep -q 'version v\?[4-9]'; then
+        yq -o json '.'
+    else
+        log_warn "No hay parser YAML disponible. Instala python3-yaml (recomendado) o yq v4+."
+        return 1
+    fi
+}
+
+# ---------------------------------------------------------------------------
 # Localizar fichero de preset
 # Precedencia: /etc/vat/presets.d/ > /usr/share/vat/presets/
 # Un preset puede vivir en cualquier fichero .yaml del directorio; el nombre
@@ -113,7 +139,7 @@ for _search_dir in "$PRESETS_LOCAL_DIR" "$PRESETS_SYSTEM_DIR"; do
     [[ -d "$_search_dir" ]] || continue
     for _f in "$_search_dir"/*.yaml; do
         [[ -f "$_f" ]] || continue
-        if yq -o json '.' "$_f" 2>/dev/null \
+        if yaml_to_json < "$_f" 2>/dev/null \
            | jq -e --arg n "$PRESET" '.presets[$n] // empty' > /dev/null 2>&1; then
             PRESET_FILE="$_f"
             break 2
@@ -130,15 +156,10 @@ fi
 log "Preset: $PRESET_FILE"
 
 # ---------------------------------------------------------------------------
-# Convertir YAML → JSON con yq (requiere mikefarah/yq v4+; -o json no existe en kislyuk/yq)
+# Convertir preset YAML → JSON
 # ---------------------------------------------------------------------------
-if ! yq --version 2>/dev/null | grep -q 'version v\?[4-9]'; then
-    log_warn "yq v4+ requerido (mikefarah/yq). Versión instalada: $(yq --version 2>/dev/null || echo 'no encontrado'). Passthrough."
-    echo "$INVENTORY"
-    exit 0
-fi
-if ! PRESET_JSON="$(yq -o json '.' "$PRESET_FILE" 2>/dev/null)"; then
-    log_error "Error parseando YAML: $PRESET_FILE"
+if ! PRESET_JSON="$(yaml_to_json < "$PRESET_FILE" 2>/dev/null)"; then
+    log_warn "Error parseando YAML: $PRESET_FILE. Passthrough."
     echo "$INVENTORY"
     exit 0
 fi
@@ -255,7 +276,6 @@ dotpath_to_jq() {
 # ===========================================================================
 # PASOS DEL PIPELINE
 # ===========================================================================
-
 # ---------------------------------------------------------------------------
 # step: select_clients
 # Filtra qué clientes del array pasan. Criterios combinados con AND.
@@ -289,7 +309,6 @@ step_select_clients() {
         if $limit > 0 then .clients |= .[:$limit] else . end
         '
 }
-
 # ---------------------------------------------------------------------------
 # step: filter_keys
 # Controla qué campos de los extras de cada cliente se incluyen.
@@ -317,20 +336,18 @@ step_filter_keys() {
             if paths == [] then .
             elif mode == "whitelist" then
                 with_entries(select(.key as $k | paths | any(. == $k)))
-            else  # blacklist
+            else
                 with_entries(select(.key as $k | paths | all(. != $k)))
             end;
 
         .clients |= map(
             .extra_imperative  = (.extra_imperative  // {} | filter_extra($imp_paths; $mode)) |
             .extra_informative = (.extra_informative // {} | filter_extra($inf_paths; $mode)) |
-            # Normalizar objetos vacíos a null
             if .extra_imperative  == {} then .extra_imperative  = null else . end |
             if .extra_informative == {} then .extra_informative = null else . end
         )
         '
 }
-
 # ---------------------------------------------------------------------------
 # step: transform
 # Renombra claves en los extras. Con defaults.drop=true, elimina las claves
@@ -354,15 +371,14 @@ step_transform() {
         def apply_rename(rules; drop):
             if . == null then null
             else
-                # Construir mapa from→to para lookup rápido
                 (rules | map({(.from): .to}) | add // {}) as $rmap |
                 with_entries(
                     if .key as $k | $rmap | has($k) then
-                        .key = $rmap[.key]       # renombrar
+                        .key = $rmap[.key] # Renombrar clave según regla
                     elif drop then
-                        empty                    # eliminar si drop=true y sin regla
+                        empty # Eliminar clave si drop=true y no hay regla de renombrado
                     else
-                        .                        # conservar sin cambios
+                        . # Mantener clave sin cambios
                     end
                 )
             end;
@@ -373,7 +389,6 @@ step_transform() {
         )
         '
 }
-
 # ---------------------------------------------------------------------------
 # step: truncate_lists
 # Limita el número de elementos en arrays dentro de los extras.
@@ -414,7 +429,6 @@ step_truncate_lists() {
         )
         '
 }
-
 # ---------------------------------------------------------------------------
 # step: anonymize
 # Anonimiza campos de cada cliente por hash (sha256) o redacción.
@@ -427,7 +441,6 @@ step_anonymize() {
 
     local mode          ; mode="$(          echo "$config" | jq -r '.mode           // "hash"')"
     local algo          ; algo="$(          echo "$config" | jq -r '.hash_algo      // "sha256"')"
-
     # Verificar sha256sum disponible cuando se necesita (coreutils)
     if [[ "$mode" == "hash" ]] && ! command -v sha256sum &>/dev/null; then
         log_error "[anonymize] sha256sum no disponible (¿coreutils instalado?). Paso omitido."
@@ -444,12 +457,11 @@ step_anonymize() {
 
     while IFS= read -r field; do
         [[ -z "$field" ]] && continue
-
-        # Separar en parte superior y subruta: "extra_imperative.user" → top=extra_imperative sub=user
+         # Separar en parte superior y subruta: "extra_imperative.user" → top=extra_imperative sub=user
         local top sub
         top="${field%%.*}"
         sub="${field#*.}"
-        [[ "$sub" == "$field" ]] && sub=""   # sin punto → campo directo
+        [[ "$sub" == "$field" ]] && sub=""
 
         if [[ "$mode" == "redact" ]]; then
             if [[ -z "$sub" ]]; then
@@ -479,7 +491,6 @@ step_anonymize() {
                     '[.clients[] | .[$top] | if type == "object" then .[$sub] else null end | if . != null then tostring else null end]')"
             fi
 
-            # Hashear cada valor en bash (null → null)
             local idx=0
             hashes_json="["
             while IFS= read -r val; do
@@ -501,7 +512,6 @@ step_anonymize() {
             done < <(echo "$vals_json" | jq -r '.[]')
             hashes_json+="]"
 
-            # Reinsertar en una sola llamada jq
             if [[ -z "$sub" ]]; then
                 result="$(echo "$result" | jq -c \
                     --arg f "$top" --argjson hashes "$hashes_json" \
@@ -525,10 +535,6 @@ step_anonymize() {
     echo "$result"
 }
 
-# ---------------------------------------------------------------------------
-# step: limit_depth
-# Limita la profundidad de anidamiento. Solo actúa sobre los extras.
-# ---------------------------------------------------------------------------
 step_limit_depth() {
     local inventory="$1"
     local config="$2"
@@ -552,17 +558,11 @@ step_limit_depth() {
             else .
             end;
 
-        # Convierte "a.b.c" en ["a","b","c"] para getpath/setpath
-        def dotpath: split(".");
-
         def apply_with_exempt(extra; strat; d; exempt):
             if extra == null then null
             else
-                # Guardar valores de rutas exentas antes de truncar
-                (exempt | map({path: dotpath, val: (. as $p | extra | try getpath($p | split(".")) catch null)}) ) as $saved |
-                # Aplicar truncado
+                (exempt | map({path: split("."), val: (. as $p | extra | try getpath($p | split(".")) catch null)}) ) as $saved |
                 (extra | truncate_at(d; strat)) as $truncated |
-                # Restaurar rutas exentas que existían
                 reduce $saved[] as $s (
                     $truncated;
                     if $s.val != null then setpath($s.path; $s.val) else . end
@@ -575,7 +575,6 @@ step_limit_depth() {
         )
         '
 }
-
 # ---------------------------------------------------------------------------
 # step: json_schema_validation
 # Valida el inventario resultante contra un JSON Schema.
@@ -600,7 +599,6 @@ step_json_schema_validation() {
         return
     fi
 
-    # JSON pasado por stdin de Python — nunca interpolado en código.
     local result
     result="$(echo "$inventory" | SCHEMA_PATH="$schema_path" python3 -c "
 import json, sys, os, jsonschema
@@ -624,7 +622,6 @@ print(json.dumps(inventory, separators=(',', ':')))
 
     echo "$result"
 }
-
 # ---------------------------------------------------------------------------
 # step: jq_arbitrary
 # Filtro jq libre. Escape hatch para lo que no cabe en pasos estructurados.
@@ -687,21 +684,20 @@ for (( idx=0; idx<STEP_COUNT; idx++ )); do
 
     NEXT=""
     case "$STEP_NAME" in
-        select_clients)        NEXT="$(step_select_clients        "$CURRENT" "$STEP_CFG")" ;;
-        filter_keys)           NEXT="$(step_filter_keys           "$CURRENT" "$STEP_CFG")" ;;
-        transform)             NEXT="$(step_transform             "$CURRENT" "$STEP_CFG")" ;;
-        truncate_lists)        NEXT="$(step_truncate_lists        "$CURRENT" "$STEP_CFG")" ;;
-        anonymize)             NEXT="$(step_anonymize             "$CURRENT" "$STEP_CFG")" ;;
-        limit_depth)           NEXT="$(step_limit_depth           "$CURRENT" "$STEP_CFG")" ;;
+        select_clients)         NEXT="$(step_select_clients         "$CURRENT" "$STEP_CFG")" ;;
+        filter_keys)            NEXT="$(step_filter_keys            "$CURRENT" "$STEP_CFG")" ;;
+        transform)              NEXT="$(step_transform              "$CURRENT" "$STEP_CFG")" ;;
+        truncate_lists)         NEXT="$(step_truncate_lists         "$CURRENT" "$STEP_CFG")" ;;
+        anonymize)              NEXT="$(step_anonymize              "$CURRENT" "$STEP_CFG")" ;;
+        limit_depth)            NEXT="$(step_limit_depth            "$CURRENT" "$STEP_CFG")" ;;
         json_schema_validation) NEXT="$(step_json_schema_validation "$CURRENT" "$STEP_CFG")" ;;
-        jq_arbitrary)          NEXT="$(step_jq_arbitrary          "$CURRENT" "$STEP_CFG")" ;;
+        jq_arbitrary)           NEXT="$(step_jq_arbitrary           "$CURRENT" "$STEP_CFG")" ;;
         *)
             log_warn "Paso desconocido: '$STEP_NAME'. Omitido."
             NEXT="$CURRENT"
             ;;
     esac
 
-    # Validar que el paso produjo JSON válido con schema {"clients": [...]}
     if ! echo "$NEXT" | jq -e '.clients | arrays' > /dev/null 2>&1; then
         apply_fail_mode "$FAIL_MODE" \
             "Paso '$STEP_NAME' produjo JSON inválido o sin schema VA*."
